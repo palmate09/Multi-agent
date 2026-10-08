@@ -42,10 +42,19 @@ jobs:
         run: ruff format --check app agents graph schemas evals tests
 
       - name: Tests
-        # conftest.py forces SKIP_OLLAMA=1 so the suite never blocks on a model.
+        # conftest.py forces SKIP_OLLAMA=1 and PYTHON_DOTENV_DISABLED=1 so the
+        # suite never blocks on a model and never reads a stray .env.
         env:
           SKIP_OLLAMA: "1"
         run: pytest -q
+
+      - name: Verify the production compose file is valid
+        run: |
+          # Catches broken interpolation and missing required-variable guards.
+          # Auth enforcement itself is covered by backend/tests/test_auth.py.
+          REGISTRY=ghcr.io/example TAG=test \
+          AUTH_SECRET=testsecret AUTH_PASSWORD_HASH=scrypt.16384.8.1.salt.digest \
+          docker compose -f ../deploy/docker-compose.prod.yml config -q
 
       - name: Stub pipeline smoke test
         run: python ../cli.py --stub
