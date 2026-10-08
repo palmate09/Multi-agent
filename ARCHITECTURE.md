@@ -41,7 +41,15 @@ Developer (spec → code)      Tester (spec+stories → tests, NEVER sees code)
 ```
 
 Two loops back to Developer, one test gate, one review gate.
-Tester ∥ Developer in parallel — Tester cannot copy Developer's mistakes (AgentCoder rule).
+
+Sequential, not parallel: the Tester's independence comes from never seeing the
+code (AgentCoder), not from running concurrently, and the small local models
+gain nothing from interleaving.
+
+**Domain coverage gate** (`agents/coverage.py`) runs between generation and
+testing. It extracts the requirement's subject matter and requires the code to
+reflect it, so a generation that answers a different question cannot be graded
+on its own tests. Below 60% match the run ends `domain_missed`.
 
 ## 3. Agent contracts
 
@@ -50,31 +58,41 @@ Each agent: one job, fixed in/out schema, measurable done condition, file in `ag
 | Agent | Takes in | Produces | Tools | Done when |
 |---|---|---|---|---|
 | Project Manager (`agents/pm.py`) | Requirement, status reports | UserStories, AC, task board, final summary, triage verdict | Task board JSON, message router | Every AC maps to ≥1 test |
-| Designer (`agents/designer.py`) | UserStories | OpenAPI YAML, data model, folder structure | OpenAPI validator | Spec validates + covers every story |
-| Developer (`agents/developer.py`) | ApiSpec + task + failure reports + reflections | FastAPI code + DB models | `read_file/write_file/run` (SWE-agent ACI), linter | App boots, lints clean, Tester suite passes |
+| Designer (`agents/designer.py`) | UserStories + requirement | OpenAPI YAML + **file plan** (`entrypoint`, `files`) | OpenAPI validator | Spec validates (shape only) + covers every story |
+| Developer (`agents/developer.py`) | ApiSpec + file plan + failure reports + reflections | FastAPI code + DB models | writes the planned files | App imports, lints clean, Tester suite passes |
 | Tester (`agents/tester.py`) | ApiSpec + stories (NOT code) | pytest suite, coverage, bug reports | pytest, coverage, Docker shell | Each endpoint: success + validation + error tests |
 | Reviewer (`agents/reviewer.py`) | Code + tests + TestReport + ruff/bandit output | Ranked comments blocker/major/minor | ruff, bandit, diff reader | 0 blockers + spec conformance confirmed |
 
 Schemas (`schemas/messages.py`, Pydantic v2):
-`Requirement, UserStory, UserStories, ApiSpec, CodeBundle{files: {path: content}}, TestSuite, TestFailure, TestReport, ReviewComment, ReviewReport, GraphState{retry_dev, retry_test, retry_review, memory[]}`.
+`Requirement, UserStory, UserStories, ApiSpec{openapi_yaml, entrypoint, files, domain_terms}, CodeBundle{files, entry_module, entry_attr}, TestSuite, TestFailure, TestReport, ReviewComment, ReviewReport, CoverageReport, GraphState{retry_*, memory[], error}`.
+
+**Entrypoint discovery** (`agents/introspect.py`) parses generated modules with
+`ast` to find the module-level `FastAPI()` instance and to enumerate route
+decorators. Nothing assumes `main.py`, and a commented-out `app = FastAPI()`
+cannot be mistaken for the real one.
 
 ## 4. Orchestration (`graph/workflow.py`, LangGraph)
 
-Nodes: `pm → designer → [developer ∥ tester] → runner → triage? → reviewer → pm_final`.
+Nodes: `pm → designer → developer → coverage → boot → tester → runner → triage? → reviewer → final`.
 Conditional edges:
 
+* `coverage -- ratio<0.6 --> final(status=domain_missed)`
+* `boot -- import failed --> final(status=unresolved)`
 * `runner -- all pass --> reviewer`
 * `runner -- fail + retry_dev<4 --> developer (with TestReport + reflection)`
 * `triage -- test_bug + retry_test<2 --> tester`
 * `reviewer -- blocker + retry_review<2 --> developer`
-* else `-- cap --> pm_final(status=unresolved)` — never hangs.
+* any generation failure → `final(status=blocked)` with the per-backend errors
+* else `-- cap --> final(status=unresolved)` — never hangs.
+
+**No LangGraph.** The orchestration is a plain sequential function; the earlier
+docstring claiming a LangGraph path with a sequential fallback was wrong.
 
 State carries `memory: str[]` (Reflexion reflections), counters, last reports.
 Every LLM call logs `{prompt, response, tokens, latency, model}` to JSONL.
 All hand-offs saved under `outputs/<run_id>/` (MetaGPT inspectable-docs rule).
 
-Fallback: if `langgraph` not installed, `workflow.py` uses a sequential
-orchestrator with identical node order and retry logic.
+
 
 ## 5. Stack (local-first, 10GB RAM + 4GB RTX 2050)
 
@@ -85,8 +103,15 @@ orchestrator with identical node order and retry logic.
 * **LLM (`agents/llm.py`):**
   * Primary local: Ollama `qwen2.5-coder:7b-instruct-q4_K_M` (fits 4GB VRAM partial offload), fallback `qwen2.5-coder:3b` / `llama3.2:3b` for PM/triage/reflection. Works when `ollama` binary present.
   * Cloud fallback router per role (Developer/Tester/Reviewer heavy): Gemini 2.0 Flash free → Groq `llama-3.3-70b` free tier → OpenRouter free → `gpt-4o-mini` paid last. Keys via env: `GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY`.
-  * **Template mode (no keys, no Ollama):** deterministic built-in generators for task-manager produce valid spec/code/tests so E2E gates pass offline. LLM used opportunistically when available.
-  * Cost savers: cache by input hash, truncate traces to 20 lines, temp 0.0–0.2, token caps per role.
+    * **No template fallback.** An earlier design substituted built-in
+    task-manager generators whenever a call failed. Because the Tester's suite
+    was also built in, a library requirement produced a task manager, passed its
+    own tests and reported `accepted`. `generate()` now returns `ok: False` and
+    `require()` raises `GenerationError`; the run ends `blocked`.
+  * **Per-role routing:** the Designer uses 7b for structured YAML, the rest 3b
+    (~12.6 vs ~6.5 tok/s on 4 CPU cores). `PREFER_LOCAL_ONLY=1` by default so a
+    rate-limited cloud key cannot silently change the output.
+  * Cost savers: cache by input hash + run scope, truncate traces, temp 0.1, per-role token caps.
 
 ## 6. Research grounding
 
@@ -118,4 +143,9 @@ docs/      # original project plan PDF
 ## 8. Quality gates and risks
 
 * Phase gates: baseline recorded → stub graph valid → app boots → loop terminates → planted bugs found (3/3) → results table published.
-* Risks: loops→caps+`unresolved`; wrong test→triage+spec-only+hand spot-check; unsafe code→Docker no-net; cost→logging+small models; luck→3× runs report spread; scope creep→REST-only.
+* Risks: loops→caps+`unresolved`; wrong test→triage+spec-only+hand spot-check;
+  unsafe code→Docker no-net; cost→logging+small models; luck→3× runs report
+  spread; scope creep→REST-only.
+* **Wrong-domain generation** → domain coverage gate + `domain_missed`.
+* **Failed generation silently substituted** → no templates; `blocked` carries
+  the per-backend errors.

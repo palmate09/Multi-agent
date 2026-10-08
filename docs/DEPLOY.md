@@ -282,8 +282,18 @@ stay open for the HTTP-01 challenge.
 
 ## 7. Running the LLM on the VM
 
-Template mode is the default and needs no model, but it only covers
-task-manager CRUD. For real generation on the VM:
+Pick a provider with `LLM_PROVIDER` in `.env`:
+
+| Value | What it does | Cost of a run on a small VM |
+|---|---|---|
+| `gemini` | calls the Gemini API with `GEMINI_API_KEY` | ~1-2 min, free tier rate-limits hard |
+| `local`  | runs Ollama on the VM | ~3-6 min on 2-4 vCPUs |
+
+`gemini` is the practical choice on a small VM; a 2-vCPU VM cannot generate a
+full app locally in reasonable time. There is no template fallback any more — a
+run that cannot reach a backend ends `blocked`, which is intentional.
+
+For local generation on the VM:
 
 ```bash
 # Pull the model once (takes a few minutes).
@@ -296,7 +306,7 @@ docker run --rm -v ollama-models:/root/.ollama \
 Then run Ollama as a sidecar rather than on the host:
 
 ```bash
-printf 'OLLAMA_URL=http://ollama:11434\nSKIP_OLLAMA=0\n' >> .env
+printf 'LLM_PROVIDER=local\nOLLAMA_URL=http://ollama:11434\nSKIP_OLLAMA=0\n' >> .env
 docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile ollama up -d
 ```
 
@@ -312,15 +322,46 @@ CPU-only inference is slow. Measured on an e2-standard-4 (4 vCPU, no GPU):
 | `qwen2.5-coder:3b` | ~15 tok/s | ~5 s |
 | `qwen2.5-coder:7b-instruct-q4_K_M` | **5.6 tok/s** | ~15 s |
 
-`agents/llm.py` defaults to a **90-second** per-call timeout. At 5.6 tok/s that
-caps the 7B at roughly 500 tokens, while the Developer role asks for 4000. So on
-CPU-only hardware the heavy roles will time out and silently fall back to
-template mode — you get a green run that never used the model.
+Local calls default to a **600-second** per-call budget
+(`OLLAMA_TIMEOUT`, or `LLM_TIMEOUT` which overrides it for every backend). This
+matters: at ~6 tok/s a 4000-token reply needs ~11 minutes, so a short timeout
+truncates the answer mid-file and the parser then reports a malformed generation.
+Per-role token ceilings (`OLLAMA_NUM_PREDICT`, or `OLLAMA_MODEL_*` plus
+`role_num_predict`) also have to be large enough for a multi-file answer.
+
+If a local run reports `model=none` with failures in the log, the model was not
+reachable or the call was cut short; check `curl -s localhost/api/llm | jq`.
+
+Set `LLM_PROVIDER=gemini` with a `GEMINI_API_KEY` and the agents route there.
+Three operational caveats, all hit during development:
+
+* **Model ids churn.** `gemini-2.0-flash` and `gemini-2.5-flash` both now return
+  404 with "no longer available to new users"; `gemini-3.8-flash` intermittently
+  returns 503 under load. `GEMINI_MODELS` is an ordered comma-separated list
+  (default `gemini-3-flash-preview,gemini-flash-latest,gemini-3.8-flash`) so one
+  bad id does not fail the run. `GEMINI_MODEL` pins a single id, which disables
+  the list — usually a mistake.
+* **Check the ids before a run.** `python backend/evals/check_gemini.py` probes
+  each id in about two seconds and prints which ones answer. Note the
+  distinction: **404 means the id is retired**, **429 means the quota is
+  exhausted and resets daily**.
+* **`GEMINI_MAX_OUTPUT_TOKENS` must be generous** (default 8192). The flash
+  models spend output tokens on reasoning before answering; a small cap returns
+  empty content with `finishReason=MAX_TOKENS`, which is indistinguishable from
+  a broken model.
+
+**The free tier rate-limits hard.** Once the quota is gone every id returns 429
+and the run ends `blocked` — it does not degrade to a fake green result.
+Transient 429/503 responses are retried with exponential backoff
+(`LLM_RETRY_MAX`, `LLM_RETRY_BACKOFF`) before the run is abandoned; timeouts are
+deliberately *not* retried, because three 120s waits would become a six-minute
+stall. Check `/api/llm` or `llm_log.jsonl` to see which failures occurred.
 
 Check what actually happened:
 
 ```bash
-tail -f ~/app/data/runs/llm_log.jsonl | jq -c '{role,model,latency}'
+# The call log lives in the runs volume, not under /app.
+tail -f ~/app/data/runs/llm_log.jsonl | jq -c '{role,model,latency,failures}'
 curl -s localhost/api/llm | jq
 ```
 
@@ -418,8 +459,10 @@ run executes. See above.
 directories survive a restart (`rehydrate()` picks them up). Fine for a single
 user, wrong for more than one.
 
-**CPU-only LLM.** See section 7. This is the practical reason template mode is
-the default.
+**CPU-only LLM.** See section 7. This is the practical reason
+`LLM_PROVIDER=gemini` is the default: a local model cannot generate a full app
+quickly enough to be useful on a small VM, and there is no template fallback to
+paper over it.
 
 ## 10. Troubleshooting
 
@@ -429,7 +472,10 @@ the default.
 | Frontend crash-looping, `host not found in upstream "backend"` | frontend and backend on different networks | both must be on `edge`; confirm with `$C ps` |
 | SSE hangs, no live updates | proxy buffering | `proxy_buffering off` in `frontend/nginx/default.conf`; `flush_interval -1` in Caddyfile |
 | `429` on create | run concurrency limit | raise `MAX_CONCURRENT_RUNS` or wait |
-| Runs stay `template` mode | Ollama unreachable from the container | `curl -s localhost/api/llm \| jq`; check `OLLAMA_URL` |
-| Generated code times out | CPU inference too slow for the 90 s limit | raise the timeout, use the 3B model, or use a hosted tier |
+| Runs end `blocked` | no backend reachable | `curl -s localhost/api/llm \| jq`; the error is in `run.error` and the log |
+| Runs end `blocked`, `429` in log | Gemini free quota exhausted | wait for the daily reset, or use `LLM_PROVIDER=local` |
+| Runs end `blocked`, `404` in log | retired Gemini model id | `python backend/evals/check_gemini.py`, then update `GEMINI_MODELS` |
+| Generation looks truncated | token ceiling too low | raise `OLLAMA_NUM_PREDICT` / `GEMINI_MAX_OUTPUT_TOKENS` |
+| Local generation times out | CPU inference slower than the budget | raise `OLLAMA_TIMEOUT`, use the 3b model, or switch to Gemini |
 | `permission denied` on Docker | user not in the `docker` group | `sudo usermod -aG docker $USER` then re-login |
 | Caddy will not start after editing | invalid config | `docker compose ... run --rm caddy caddy validate --config /etc/caddy/Caddyfile` |

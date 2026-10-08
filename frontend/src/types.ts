@@ -5,6 +5,7 @@ export type PipelineNode =
   | "pm"
   | "designer"
   | "developer"
+  | "coverage"
   | "tester"
   | "runner"
   | "triage"
@@ -31,7 +32,19 @@ export interface RunSummary {
   attempts_test: number;
   review_rounds: number;
   wall_time: number | null;
+  /** Module the generated app was imported from, discovered from the code. */
+  entrypoint?: string | null;
+  /** Files the Developer actually emitted; the layout follows the design. */
+  files?: string[];
   error?: string | null;
+}
+
+/** Verdict from the domain coverage gate. */
+export interface Coverage {
+  covered: string[];
+  missing: string[];
+  /** False when the requirement was too vague to judge; the gate is advisory. */
+  conclusive: boolean;
 }
 
 export interface UserStory {
@@ -60,6 +73,7 @@ export interface RunDetail extends RunSummary {
   tests: Record<string, string>;
   review: { comments: ReviewComment[] } | null;
   report: { passed: number; failed: number; raw?: string } | null;
+  coverage?: Coverage | null;
   memory: string[];
 }
 
@@ -106,6 +120,7 @@ export const NODE_LABELS: Record<PipelineNode, string> = {
   pm: "PM",
   designer: "Designer",
   developer: "Developer",
+  coverage: "Domain check",
   tester: "Tester",
   runner: "Sandbox",
   triage: "Triage",
@@ -117,6 +132,7 @@ export const NODE_ORDER: PipelineNode[] = [
   "pm",
   "designer",
   "developer",
+  "coverage",
   "tester",
   "runner",
   "triage",
@@ -126,7 +142,15 @@ export const NODE_ORDER: PipelineNode[] = [
 
 export function statusTone(status: string): "good" | "warn" | "bad" | "idle" {
   if (status.startsWith("accepted")) return "good";
-  if (status === "failed" || status === "unresolved" || status === "unresolved_review")
+  // blocked = an agent produced nothing; domain_missed = it answered a different
+  // question. Both are failures the old design could not report.
+  if (
+    status === "failed" ||
+    status === "unresolved" ||
+    status === "unresolved_review" ||
+    status === "blocked" ||
+    status === "domain_missed"
+  )
     return "bad";
   if (status === "running" || status === "queued" || status === "tests_green")
     return "warn";

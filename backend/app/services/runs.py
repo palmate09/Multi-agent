@@ -105,6 +105,9 @@ class Run:
                         "attempts_test": s.get("attempts_test", 0),
                         "review_rounds": s.get("review_rounds", 0),
                         "wall_time": s.get("wall_time"),
+                        "entrypoint": s.get("entrypoint"),
+                        "files": s.get("files", []),
+                        "error": s.get("error") or self.error,
                     }
                 )
             except json.JSONDecodeError:
@@ -123,6 +126,7 @@ class Run:
             data["tests"] = dict(st.tests.files) if st.tests else {}
             data["review"] = st.review.model_dump() if st.review else None
             data["report"] = st.report.model_dump() if st.report else None
+            data["coverage"] = st.coverage.model_dump() if st.coverage else None
             data["memory"] = list(st.memory)
         else:
             data.update(self._artifacts_from_disk())
@@ -136,6 +140,7 @@ class Run:
             "tests": {},
             "review": None,
             "report": None,
+            "coverage": None,
             "memory": [],
         }
         if not self.run_dir.exists():
@@ -163,6 +168,10 @@ class Run:
         if reports:
             with contextlib.suppress(json.JSONDecodeError):
                 out["report"] = json.loads(reports[-1].read_text())
+        cov = self.run_dir / "coverage.json"
+        if cov.exists():
+            with contextlib.suppress(json.JSONDecodeError):
+                out["coverage"] = json.loads(cov.read_text())
         refl = self.run_dir / "reflections.json"
         if refl.exists():
             with contextlib.suppress(json.JSONDecodeError):
@@ -275,6 +284,7 @@ class RunStore:
                 skip_tester=bool(run.options.get("skip_tester")),
                 skip_reviewer=bool(run.options.get("skip_reviewer")),
                 on_event=run.emit,
+                run_id=run.run_id,
             )
             run.status = run.state.status
         except Exception as exc:

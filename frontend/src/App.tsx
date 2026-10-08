@@ -330,6 +330,23 @@ export default function App() {
                     <div className="k">Wall (s)</div>
                   </div>
                 </div>
+                {detail.entrypoint && (
+                  <div className="hint" style={{ marginTop: 10 }}>
+                    Entrypoint{" "}
+                    <code>
+                      {detail.entrypoint}
+                      {detail.files ? ` · ${detail.files.join(", ")}` : ""}
+                    </code>
+                  </div>
+                )}
+                {detail.coverage && detail.coverage.conclusive && (
+                  <div className={`alert ${detail.coverage.missing.length ? "error" : "note"}`} style={{ marginTop: 10 }}>
+                    Domain check:{" "}
+                    {detail.coverage.missing.length === 0
+                      ? `all requirement terms present (${detail.coverage.covered.length})`
+                      : `missing ${detail.coverage.missing.join(", ")}`}
+                  </div>
+                )}
               </div>
 
               <div className="tabs">

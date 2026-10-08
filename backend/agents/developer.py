@@ -1,166 +1,229 @@
-"""Developer: spec -> FastAPI CodeBundle. SWE-agent ACI (read/write/run only). Reflexion reflection."""
+"""Developer: spec -> CodeBundle.
+
+The template bundle that used to live here (fixed ``database.py`` /
+``models.py`` / ``schemas_pyd.py`` / ``main.py``) is gone. It was substituted
+whenever generation failed, so a library request silently became a task
+manager. Now the file layout comes from the Designer's plan, and a failed
+generation raises instead of substituting anything.
+"""
 
 from __future__ import annotations
 
-from agents.llm import generate
+import re
+
+from agents.blocks import parse_file_blocks
+from agents.introspect import find_app_object
+from agents.llm import GenerationError, require
 from schemas.messages import ApiSpec, CodeBundle, TestReport
 
-DB_PY = """from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
-import os
-DB_PATH = os.environ.get("TASKS_DB", "./tasks.db")
-engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-Base = declarative_base()
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-"""
-
-MODELS_PY = """from sqlalchemy import Column, Integer, String, Boolean
-from database import Base
-class Task(Base):
-    __tablename__ = "tasks"
-    id = Column(Integer, primary_key=True, index=True)
-    title = Column(String, nullable=False)
-    description = Column(String, default="")
-    done = Column(Boolean, default=False)
-    due = Column(String, nullable=True)
-"""
-
-SCHEMAS_PY = """from pydantic import BaseModel, Field
-class TaskCreate(BaseModel):
-    title: str = Field(min_length=1)
-    description: str = ""
-    done: bool = False
-    due: str | None = None
-class TaskOut(TaskCreate):
-    id: int
-"""
-
-MAIN_PY = """from fastapi import FastAPI, Depends, HTTPException
-from sqlalchemy.orm import Session
-from database import Base, engine, get_db
-import models
-import schemas_pyd
-
-Base.metadata.create_all(bind=engine)
-app = FastAPI(title="Task Manager API")
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-@app.post("/tasks", response_model=schemas_pyd.TaskOut, status_code=201)
-def create_task(payload: schemas_pyd.TaskCreate, db: Session = Depends(get_db)):
-    obj = models.Task(title=payload.title, description=payload.description, done=payload.done, due=payload.due)
-    db.add(obj); db.commit(); db.refresh(obj)
-    return schemas_pyd.TaskOut(id=obj.id, title=obj.title, description=obj.description or "", done=obj.done, due=obj.due)
-
-@app.get("/tasks", response_model=list[schemas_pyd.TaskOut])
-def list_tasks(db: Session = Depends(get_db)):
-    rows = db.query(models.Task).all()
-    return [schemas_pyd.TaskOut(id=r.id, title=r.title, description=r.description or "", done=r.done, due=r.due) for r in rows]
-
-def _get_or_404(task_id: int, db: Session):
-    obj = db.query(models.Task).filter(models.Task.id == task_id).first()
-    if not obj:
-        raise HTTPException(status_code=404, detail="Task not found")
-    return obj
-
-@app.get("/tasks/{task_id}", response_model=schemas_pyd.TaskOut)
-def get_task(task_id: int, db: Session = Depends(get_db)):
-    r = _get_or_404(task_id, db)
-    return schemas_pyd.TaskOut(id=r.id, title=r.title, description=r.description or "", done=r.done, due=r.due)
-
-@app.put("/tasks/{task_id}", response_model=schemas_pyd.TaskOut)
-def update_task(task_id: int, payload: schemas_pyd.TaskCreate, db: Session = Depends(get_db)):
-    r = _get_or_404(task_id, db)
-    r.title, r.description, r.done, r.due = payload.title, payload.description, payload.done, payload.due
-    db.commit(); db.refresh(r)
-    return schemas_pyd.TaskOut(id=r.id, title=r.title, description=r.description or "", done=r.done, due=r.due)
-
-@app.delete("/tasks/{task_id}")
-def delete_task(task_id: int, db: Session = Depends(get_db)):
-    r = _get_or_404(task_id, db)
-    db.delete(r); db.commit()
-    return {"ok": True}
-"""
-
 SOP = (
-    "You are the Developer. Output ONLY file blocks like "
-    "### main.py\\n<code>. Build FastAPI+SQLite task-manager CRUD + /health. No prose."
+    "You are the Developer. Implement the given OpenAPI spec as a runnable "
+    "FastAPI application.\n"
+    "Rules:\n"
+    "- Create EXACTLY these files, and no others:\n{file_plan}\n"
+    "- The module {entrypoint} must create and expose the ASGI app, e.g. `app = FastAPI()`.\n"
+    "- Use SQLAlchemy with SQLite for persistence unless the spec says otherwise.\n"
+    "- You MUST create the tables at import time, before any request is served, "
+    "with `Base.metadata.create_all(bind=engine)` right after defining the models. "
+    "The test database starts out empty and nothing else will create the schema, so "
+    "omitting this makes every request fail with 'no such table'.\n"
+    "- Return error responses the spec declares (404, 422, 409...).\n"
+    "- Import every symbol you use; do not reference an undefined name.\n"
+    "- Split modules as listed in the file plan only. Do not invent extra files.\n"
+    "Reply with file blocks in this exact format and no prose:\n"
+    "### <filename>\n```python\n<complete code>\n```\n"
+    "For the dependency list reply with one final block:\n"
+    "### requirements.txt\n```\n<one package per line>\n```"
 )
 
 
-def _template_bundle() -> CodeBundle:
-    return CodeBundle(
-        files={
-            "database.py": DB_PY,
-            "models.py": MODELS_PY,
-            "schemas_pyd.py": SCHEMAS_PY,
-            "main.py": MAIN_PY,
-            "requirements.txt": "fastapi\nuvicorn\nsqlalchemy\npydantic\n",
-        }
-    )
+def _file_plan_block(spec: ApiSpec) -> tuple[list[str], str]:
+    """Return ``(filenames, human-readable plan)`` for the prompt."""
+    names = [f for f in (spec.files or []) if f]
+    if spec.entrypoint and spec.entrypoint not in names:
+        names.insert(0, spec.entrypoint)
+    if not names:
+        names = [spec.entrypoint or "main.py"]
+    plan = "\n".join(f"- {n}" for n in names)
+    return names, plan
+
+
+def _finish(files: dict[str, str], required: list[str]) -> CodeBundle:
+    """Trim to the planned files and resolve the entrypoint from the code.
+
+    Files outside the plan are dropped: a model that appends a stray scratch
+    file otherwise produces a bundle that fails lint and confuses the Tester
+    about what the entrypoint is.
+    """
+    keep = set(required)
+    trimmed = {name: body for name, body in files.items() if name in keep}
+    # requirements.txt is always allowed through; the runner needs it.
+    if "requirements.txt" in files:
+        trimmed.setdefault("requirements.txt", files["requirements.txt"])
+    found = find_app_object(trimmed)
+    entry_module = entry_attr = ""
+    if found:
+        entry_module, entry_attr = found
+    return CodeBundle(files=trimmed, entry_module=entry_module, entry_attr=entry_attr or "app")
+
+
+def _meaningful_change(before: dict[str, str], after: dict[str, str]) -> bool:
+    """True when ``after`` differs from ``before`` beyond trailing whitespace.
+
+    The file parser strips fences, so a model that re-emits an unchanged file
+    returns bodies differing only by a trailing newline. Counting that as a
+    repair makes the loop believe it made progress and burns the retry budget
+    re-running identical code.
+    """
+    if set(before) != set(after):
+        return True
+    return any((before[k] or "").rstrip() != (after[k] or "").rstrip() for k in before)
+
+
+def _merged(before: dict[str, str], patch: dict[str, str]) -> dict[str, str]:
+    merged = dict(before)
+    merged.update({k: v for k, v in patch.items() if v.strip()})
+    return merged
 
 
 def spec_to_code(spec: ApiSpec) -> CodeBundle:
-    text, _meta = generate(
-        f"OpenAPI (truncated):\n{spec.openapi_yaml[:2500]}\nEmit file blocks.",
-        SOP,
-        role="developer",
-        max_tokens=4000,
+    """Generate the application. Raises ``GenerationError`` on failure."""
+    required, plan = _file_plan_block(spec)
+    prompt = (
+        f"OpenAPI spec:\n{spec.openapi_yaml[:6000]}\n\n"
+        f"Files to create (exactly these):\n{plan}\n"
+        f"Entrypoint module: {required[0]}\n"
     )
-    if text and "main.py" in text and "FastAPI" in text:
-        # Best-effort parse of ### file blocks; validate it imports
-        import re
+    text, _meta = require(
+        f"{prompt}Emit the file blocks.",
+        SOP.format(file_plan=plan, entrypoint=required[0]),
+        role="developer",
+    )
+    files = parse_file_blocks(text)
+    py_files = [n for n in files if n.endswith(".py") and files[n].strip()]
+    if not py_files:
+        raise GenerationError(
+            f"Developer produced no usable python files; planned {required}, got {sorted(files)}"
+        )
+    # The entrypoint must actually exist or nothing downstream can import the app.
+    if required[0] not in files:
+        raise GenerationError(
+            f"Developer omitted the planned entrypoint {required[0]!r}; got {sorted(py_files)}"
+        )
+    bundle = _finish(files, required)
+    if not bundle.entry_module:
+        raise GenerationError(
+            f"No module in {sorted(bundle.files)} assigns a FastAPI() app to a module-level "
+            "name, so the application cannot be imported or tested"
+        )
+    return bundle
 
-        files: dict[str, str] = {}
-        for m in re.finditer(r"###\s+(\S+)\s*\n```?\w*\n?(.*?)```", text, re.S):
-            files[m.group(1).strip()] = m.group(2)
-        if "main.py" in files and len(files) >= 2:
-            return CodeBundle(files=files)
-    return _template_bundle()
+
+def repair_lint(code: CodeBundle, ruff_out: str, rounds: int = 2) -> CodeBundle:
+    """Fix static errors before pytest is involved.
+
+    Undefined names and syntax errors are the most common small-model mistake
+    (a generated app routinely uses ``Boolean`` without importing it) and they
+    are cheap to detect: ruff costs about a second, while a failing pytest cycle
+    costs a full LLM generation plus a test run. Feeding the exact ruff line
+    back is far more reliable than hoping the test output leads the model to the
+    missing import.
+    """
+    if not ruff_out:
+        return code
+    for _ in range(rounds):
+        problems = [
+            line
+            for line in ruff_out.splitlines()
+            if re.search(r"\b(F821|F811|E9\d\d|F401)\b|SyntaxError|undefined name", line)
+        ]
+        if not problems:
+            return code
+        detail = "\n".join(problems[:20])
+        current = "\n\n".join(
+            f"### {name}\n```python\n{body[:5000]}\n```" for name, body in code.files.items()
+        )
+        try:
+            text, _meta = require(
+                f"Static analysis errors:\n{detail}\n\nCurrent code:\n{current}\n\n"
+                "Reply with ONLY the corrected file blocks. Add the missing imports and fix the "
+                "reported errors. Do not change anything else. No prose.",
+                SOP.format(
+                    file_plan="\n- " + "\n- ".join(sorted(code.files)),
+                    entrypoint=code.entry_module or "",
+                ),
+                role="developer",
+            )
+        except GenerationError:
+            return code
+        if not text:
+            return code
+        merged = _merged(code.files, parse_file_blocks(text))
+        if not _meaningful_change(code.files, merged):
+            return code
+        found = find_app_object(merged) or (code.entry_module, code.entry_attr)
+        code = CodeBundle(files=merged, entry_module=found[0], entry_attr=found[1] or "app")
+    return code
 
 
 def reflect(report: TestReport) -> str:
+    """2-3 sentences on root cause and fix direction (Reflexion)."""
     blob = "; ".join(f"{f.name}: {f.error}" for f in report.failures[:5])
-    text, _ = generate(
-        f"Failures: {blob}\nWrite 2-3 sentences: root cause + fix direction.",
-        "You reflect on test failures.",
-        role="reflection",
-    )
-    if text and len(text.strip()) > 20:
-        return " ".join(text.strip().split())[:600]
+    try:
+        text, _meta = require(
+            f"Failures: {blob}\nIn 2-3 sentences: the root cause and the fix direction.",
+            "You reflect on test failures of a FastAPI app.",
+            role="reflection",
+        )
+        if text and len(text.strip()) > 20:
+            return " ".join(text.strip().split())[:600]
+    except GenerationError:
+        pass
     if report.failures:
         first = report.failures[0]
         return (
-            f"Failure in {first.name}: {first.error[:200]}. "
-            "Likely cause is a missing validation/404 branch or field mismatch. "
-            "Fix the specific endpoint and re-run the failing tests only."
+            f"Failure in {first.name}: {first.error[:200]}. Likely a missing error branch, "
+            "a field mismatch, or an unimplemented endpoint. Fix that endpoint and re-run."
         )
-    return "No failures; keep current implementation."
+    return "No failures recorded; keep the current implementation."
 
 
 def patch_code(code: CodeBundle, report: TestReport, reflection: str) -> CodeBundle:
-    # Template path is already correct for our suite; LLM patch attempted opportunistically.
-    text, _meta = generate(
-        f"Reflection: {reflection}\nFailures: {[(f.name, f.error) for f in report.failures[:5]]}\n"
-        "Output ONLY fixed ### file blocks for failing files.",
-        SOP,
-        role="developer",
-    )
-    if text and "main.py" in text and len(text) > 500:
-        import re
+    """Patch the bundle for failing tests.
 
-        files = dict(code.files)
-        for m in re.finditer(r"###\s+(\S+)\s*\n```?\w*\n?(.*?)```", text, re.S):
-            files[m.group(1).strip()] = m.group(2)
-        if files != code.files:
-            return CodeBundle(files=files)
-    return code
+    The current contents must be in the prompt. Without them the model has
+    nothing to patch and regenerates the same bundle every attempt, so the fix
+    loop spins without progress. Only the files are re-emitted; the runner
+    merges them over the existing bundle.
+    """
+    current = "\n\n".join(
+        f"### {name}\n```python\n{body[:5000]}\n```" for name, body in code.files.items()
+    )
+    failures = "; ".join(f"{f.name}: {f.error[:200]}" for f in report.failures[:5])
+    try:
+        text, _meta = require(
+            f"Reflection: {reflection}\n\nFailing tests:\n{failures}\n\n"
+            f"Current code:\n{current}\n\n"
+            "Reply with ONLY the file blocks you changed, complete and runnable. "
+            "Change only what fixes the failures. No prose. Remember: the tables must be "
+            "created at import time with Base.metadata.create_all(bind=engine), and every "
+            "symbol you reference must be imported.",
+            SOP.format(
+                file_plan="\n- " + "\n- ".join(sorted(code.files)),
+                entrypoint=code.entry_module or "",
+            ),
+            role="developer",
+        )
+    except GenerationError:
+        return code
+    if not text or "def " not in text:
+        return code
+    patched = parse_file_blocks(text)
+    merged = dict(code.files)
+    merged.update({k: v for k, v in patched.items() if v.strip()})
+    if merged == code.files:
+        # Nothing changed: the caller stops rather than retrying identical input.
+        return code
+    found = find_app_object(merged)
+    module, attr = found if found else (code.entry_module, code.entry_attr)
+    return CodeBundle(files=merged, entry_module=module, entry_attr=attr or "app")

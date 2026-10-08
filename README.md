@@ -1,7 +1,11 @@
 # Multi-Agent Software Team
 
 5 LLM agents turn plain English into a tested, reviewed FastAPI REST API.
-Local-first: Ollama primary, free cloud fallback, template mode offline.
+
+Bring your own model: a Gemini API key (a run takes 1-2 minutes) or local
+Ollama (free and private, but 3-6 minutes on CPU). There is **no template
+fallback** — if generation fails the run reports `blocked` and says why, rather
+than quietly substituting a built-in answer.
 
 Ships with a web UI (React + Vite behind nginx), a FastAPI backend that streams
 agent progress over SSE, Docker images for both, and a CI/CD pipeline that
@@ -10,7 +14,8 @@ deploys to a GCP VM.
 ## Architecture
 
 ```
-Requirement -> PM (stories) -> Designer (OpenAPI) -> Developer || Tester
+Requirement -> PM (stories) -> Designer (OpenAPI + file plan) -> Developer
+  -> domain coverage gate -> boot check -> Tester || (developer self-checks)
   -> Sandbox Runner -> triage+reflection -> Developer -> Reviewer (ruff+bandit) -> done
 ```
 
@@ -21,30 +26,53 @@ browser ──> Caddy ──> nginx (SPA + /api proxy) ──> FastAPI ──> a
 
 See `ARCHITECTURE.md`, `EXECUTION_PLAN.md`, `docs/DEPLOY.md`. Original brief: `docs/`.
 
-## Quickstart
+## Requirements
 
-Everything at once (creates a venv, runs every phase gate):
+One model backend. There is no offline fallback any more, by design: the
+previous template mode graded a task-manager template with a task-manager test
+suite, so a library requirement still reported `accepted`.
+
+**Groq (recommended)** — paste a key from <https://console.groq.com/keys>:
 
 ```bash
-./run_all.sh            # template mode, offline, ~20s
-./run_all.sh --llm      # use local Ollama (slow on CPU)
-./run_all.sh --docker   # sandbox tests in Docker
+cp .env.example .env          # add GROQ_API_KEY, keep LLM_PROVIDER=groq
+python backend/evals/check_llm.py     # validates the key and prints the model serving
 ```
 
-Manually:
+**Ollama (local, no key)**
+
+```bash
+ollama pull qwen2.5-coder:7b-instruct-q4_K_M   # Designer
+ollama pull qwen2.5-coder:3b                    # developer/tester/reviewer/pm
+# then set LLM_PROVIDER=local and SKIP_OLLAMA=0 in .env
+```
+
+## Quickstart
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate   # `python` alone is not on PATH
 pip install -r backend/requirements.txt
-pytest -q
-python cli.py --run "task manager" --out outputs/demo
+pytest -q                                       # offline suite, no model needed
+python cli.py --run "a library API that lends books" --out outputs/demo --live
 python cli.py --eval
 ```
 
-## Web UI
+`./run_all.sh` runs every gate in order and prints a pass/fail table. Pass
+`--llm` to include the generation gates, which use whichever provider
+`$LLM_PROVIDER` names.
 
-One command. It generates credentials if `.env` is missing, prints the
-password once, and starts the stack:
+Measured wall time for a 3-endpoint API:
+
+| Provider | Wall time (4-endpoint API) |
+|---|---|
+| Groq (`qwen/qwen3.8-27b`) | ~45-100 s |
+| Gemini (`gemini-3-flash-preview`) | ~100-160 s |
+| Ollama 3b on 4 CPU cores | ~350 s |
+
+The gap is throughput: the local models manage ~12 tok/s (3b) and ~6.5 tok/s
+(7b) without a GPU, and a full app is 800-2000 tokens.
+
+## Web UI
 
 ```bash
 ./deploy/bootstrap-env.sh
@@ -52,103 +80,149 @@ docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d --build
 open http://localhost          # sign in with the password it printed
 ```
 
-`bootstrap-env.sh` is idempotent — it keeps any credentials you already have
-and only fills in what is missing.
-
-For hot-reloading development instead (Vite dev server, API on `:8000`):
+For hot-reloading development (Vite dev server, API on `:8000`):
 
 ```bash
 docker compose up            # UI on :5173
 ```
 
-Dev leaves auth **off**, even if `deploy/bootstrap-env.sh` has written a
-production `.env` in the repo root (Compose loads that file automatically). To
-exercise the login flow locally, opt in explicitly:
-
-```bash
-DEV_AUTH_USERNAME=admin \
-DEV_AUTH_SECRET=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))') \
-DEV_AUTH_PASSWORD_HASH=$(python3 backend/scripts/gen_auth.py 'dev-pass' | sed -n 's/^AUTH_PASSWORD_HASH=//p') \
-  docker compose up
-```
-
 Change a lost password with `./deploy/bootstrap-env.sh --reset-password`, then
 recreate the backend container.
 
-### If nothing shows up
+## How a run can end
 
-```bash
-docker compose --env-file .env -f deploy/docker-compose.prod.yml ps   # all three must be Up
-docker compose --env-file .env -f deploy/docker-compose.prod.yml logs --tail=50 frontend
-curl -s localhost/health
+| Status | Meaning |
+|---|---|
+| `accepted` | tests green, review found no blockers |
+| `accepted_no_review` | tests green, reviewer ablated for this run |
+| `unresolved` | retry budget exhausted with tests still failing, or the app would not import |
+| `unresolved_review` | review blockers survived the retry budget |
+| `blocked` | an agent could not produce a valid result; `error` names the cause |
+| `domain_missed` | the code does not implement the requested domain |
+
+`blocked` and `domain_missed` are the two statuses the old design could not
+produce. They exist so that "accepted" means the run actually did what you
+asked.
+
+## The domain coverage gate
+
+The defect this project is built to avoid: a library requirement produced a task
+manager, its self-written tests passed, and the run reported `accepted`.
+
+Before any test is graded, `agents/coverage.py` extracts the subject matter from
+your requirement and checks the generated code actually reflects it:
+
+```
+requirement: library that lends books, POST /loans, GET /books, ISBN
+code contains: Book, Loan, /loans, /books, isbn   -> covered
 ```
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| `error while interpolating ... AUTH_SECRET is missing` | no credentials in `.env` | run `./deploy/bootstrap-env.sh` |
-| Containers never created | compose refused to start | read the error above; it names the missing key |
-| `frontend` restarting, `host not found in upstream "backend"` | services on different networks | both must be on the `edge` network |
-| SPA loads but every API call 401s | not signed in, or expired session | sign in again; check `AUTH_SESSION_HOURS` |
-| `bind: address already in use` | port 80 or 5173 taken | `./deploy/stop.sh`, or change `SITE_ADDRESS` |
-| Works locally, blank from another machine | firewall | open the port, see `docs/DEPLOY.md` §1 |
+Below a 60% match the run ends `domain_missed`. A requirement too vague to
+extract terms from (fewer than 2) is treated as inconclusive and never blocks.
 
-## Authentication
+## Generated file layout
 
-Session-cookie login with a scrypt-hashed password, plus an API key for
-headless access. Every `/api/*` route and the UI are gated; only `/health` and
-the auth endpoints are public.
+The Designer chooses the module layout from the requirement's complexity and the
+Developer emits exactly those files. Nothing is fixed: a 3-endpoint app may be a
+single module, while a larger one gets `models.py`, `schemas_pyd.py` and routers.
 
-`deploy/bootstrap-env.sh` handles this for you. To manage credentials by hand:
+The entrypoint is **discovered from the code** by AST inspection
+(`agents/introspect.py`) rather than assumed to be `main.py`, so `app.py`,
+`server.py` and nested packages all work.
+
+## Choosing a backend
+
+`LLM_PROVIDER` selects the strategy:
+
+| Value | Behaviour |
+|---|---|
+| `groq` | Groq only (recommended) |
+| `gemini` | Gemini only |
+| `github` | GitHub Models only — free with a GitHub token |
+| `openrouter` / `huggingface` / `openai` | that provider only |
+| `local` | Ollama only, never the network |
+| `auto` | every hosted tier in turn |
+
+Naming one provider matters on a free tier: `auto` would spend a request on
+each provider you have no key for before reaching the one you configured.
+
+Check what is actually serving requests:
 
 ```bash
-python backend/scripts/gen_auth.py     # prints hash + secret + API key
+$ python backend/evals/check_llm.py
+tiers to try: ['groq/free']
+smoke call: model=groq/qwen/qwen3.8-27b ok=True latency=0.08s
 ```
 
-Paste the output into `.env` (or the VM's `/opt/multi-agent-team/.env`).
-Production compose refuses to start without `AUTH_SECRET` and
-`AUTH_PASSWORD_HASH`. Details, rotation and CSRF behaviour: `docs/DEPLOY.md` §4a.
+Three failure modes that all look alike, and need opposite fixes:
 
-## LLM backends
+* **HTTP 403 from Groq** means either a decommissioned model id *or* a rejected
+  key — Groq does not use 404. The current ids, verified against
+  `GET /openai/v1/models`, are `qwen/qwen3.8-27b`, `openai/gpt-oss-20b` and
+  `openai/gpt-oss-120b`.
+* **HTTP 404 from Gemini** means the model id is retired; `gemini-2.5-flash` and
+  `gemini-2.0-flash` both now fail this way for new accounts. Hence
+  `GEMINI_MODELS` is an ordered list rather than one pinned id.
+* **HTTP 429** means the free quota is spent and resets daily.
 
-Local Ollama first, then free hosted tiers, then deterministic templates.
-Template mode is always the fallback and needs nothing.
+`llm.py` sends an explicit `User-Agent` because Cloudflare — which fronts Groq —
+rejects urllib's default agent with `403 error code: 1010`, which is
+indistinguishable from a bad key. If you ever see that exact code, it is the
+user agent, not your key.
+
+Per-role model routing applies to the local path, because the roles have very
+different appetites:
 
 ```bash
-ollama pull qwen2.5-coder:7b-instruct-q4_K_M   # developer/tester/reviewer
-ollama pull qwen2.5-coder:3b                    # pm/triage/reflection
-cp .env.example .env                            # add GEMINI_API_KEY etc.
+OLLAMA_MODEL_DESIGNER=qwen2.5-coder:7b-instruct-q4_K_M   # structured YAML quality
+OLLAMA_MODEL_DEVELOPER=qwen2.5-coder:3b                 # ~2x faster on CPU
 ```
 
-`SKIP_OLLAMA=1` skips local models entirely — useful on machines where Ollama is
-not installed, otherwise every call burns the probe timeout.
-
-On CPU-only hardware the 7B q4 model measures **5.6 tok/s** (4 vCPU), so the
-90-second per-call timeout in `agents/llm.py` caps it near 500 tokens and long
-generations silently fall back to templates. Prefer the 3B on CPU, or a hosted
-tier for the heavy roles. See `docs/DEPLOY.md` §7 for measured numbers.
+If no backend answers, the run is `blocked` with the per-backend errors in
+`GraphState.error`. Every call is logged to `$RUNS_DIR/llm_log.jsonl` with its
+latency and the reason each fallback declined.
 
 ## Results
 
-| Run | Status | Pass rate | Spec coverage | Attempts |
-|---|---|---|---|---|
-| eval_task-manager | accepted | 1.0 | 1.0 | 0 |
-| eval_task-manager-filter | accepted | 1.0 | 1.0 | 0 |
-| eval_task-manager-notes | accepted | 1.0 | 1.0 | 0 |
-| baseline (single-agent) | 7/7 pass | 1.0 | — | — |
-| abl_no_tester | accepted | 1.0 | — | 0 |
-| abl_no_reviewer | accepted_no_review | 1.0 | — | 0 |
+Two unrelated domains, both generated from a plain-English prompt with no
+task-manager template anywhere in the codebase:
 
-**Read this honestly:** `attempts = 0` across the board means the fix loop,
-triage and reflexion never executed. In template mode the Developer emits a
-known-good bundle and the Tester emits a matching suite, so the first `pytest`
-is always green and the Reviewer sees only clean static checks. These numbers
-are a regression harness, not evidence that the multi-agent loop beats a single
-agent. `docs/DEPLOY.md` §9 lists the other limits, including that the sandbox
-runs generated code without isolation when Docker is unavailable.
+Four unrelated domains, each generated from a plain-English prompt with no
+task-manager template anywhere in the codebase:
+
+| Run | Requirement | Status | Tests | Spec coverage | Retries | Wall |
+|---|---|---|---|---|---|---|
+| verify_recipes | `/recipes` CRUD, 404 + blank-title 422 | accepted | 9 passed | 4/4 | 0 | 46 s |
+| verify_library | `/loans`, `/books`, ISBN 404 | accepted | 5 passed | 3/3 | 1 | 73 s |
+| verify_inventory | warehouse stock, `/products`, SKU 404/422 | accepted | 10 passed | 4/4 | 0 | 99 s |
+| verify_final | book club, `/members`, `/meetings` | accepted | 9 passed | 4/4 | 1 | 127 s |
+
+Zero occurrences of `task` in any generated file. Two of the four runs needed a
+repair cycle: one failed to import (the boot-repair loop fixed it), one had no
+`create_all` so every request hit `no such table` (the Tester caught it and the
+Developer patched it). So the repair loops do real work rather than reporting
+zeros. `spec_coverage` compares the endpoints the spec declares against the
+routes the code exposes — it is not a substring count.
+
+The generated file layout varies with the requirement: the recipe and library
+APIs came back as `main.py` + `requirements.txt`, while the inventory and book
+club APIs were split into `database.py`, `models.py`, `schemas.py`, `main.py`.
+Nothing about that split is hardcoded.
+
+Regenerate with `python cli.py --eval`. Per-run detail is in
+`outputs/<run>/summary.json`.
+
+**Caveats:**
+
+* A run needs a working backend and quota. When the quota is spent the run ends
+  `blocked` with the reason, rather than reporting a green result it did not earn.
+* Test counts vary with how much the Tester can exercise: a spec with no
+  `POST /books` leaves the loan-creation test without a fixture, and such a test
+  is skipped, i.e. unverified.
 
 ## Deployment
 
-Push an `v*` tag: CI builds both images, pushes to GHCR, and rolls the VM over
+Push a `v*` tag: CI builds both images, pushes to GHCR, and rolls the VM over
 SSH. Full walkthrough in **`docs/DEPLOY.md`** (GCP VM creation, firewall,
 bootstrap, secrets, TLS without a domain, operating and backing up).
 
@@ -165,7 +239,13 @@ run_all.sh   run every phase gate in order
 
 ## Limits
 
-* Template mode covers task-manager CRUD only; novel domains need an LLM backend.
+* **Requires a local model.** With no backend the run is `blocked`; that is
+  deliberate, but it means there is no offline demo.
+* A 3b model on CPU makes real mistakes on complex specs. The fix loop is
+  genuine but bounded at 4 developer retries; failures end `unresolved` with
+  the pytest output attached.
+* The coverage gate is lexical. It proves the domain vocabulary is present, not
+  that the behaviour is correct — the tests and reviewer cover that.
 * SWE-bench Lite is a stretch goal, not yet run.
 * One shared operator account, not per-user accounts.
 * Sessions are stateless, so logout clears the cookie but a copied cookie stays

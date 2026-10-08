@@ -49,17 +49,31 @@ def test_root_advertises_docs(client):
     assert body["docs"] == "/api/docs"
 
 
-def test_create_run_executes_and_settles(client):
+def test_create_run_executes_and_settles(client, fake_pipeline):
+    """HTTP lifecycle, with generation stubbed.
+
+    Generation is exercised by the ``live_llm`` tests; the API suite must not
+    depend on a model being reachable.
+    """
     resp = client.post("/api/runs", json={"requirement": REQUIREMENT})
     assert resp.status_code == 202
     run_id = resp.json()["run_id"]
 
     detail = _wait_for(client, run_id)
-    assert detail["status"].startswith("accepted"), detail
+    assert detail["status"] == "accepted", detail
     assert detail["tests_passed"] > 0
     assert detail["tests_failed"] == 0
-    assert "main.py" in detail["code"]
+    assert "app.py" in detail["code"]
     assert detail["tests"]
+    assert detail["entrypoint"] or detail["code"]
+
+
+def test_run_reports_blocked_when_generation_fails(client, no_llm):
+    """No backend must surface as ``blocked``, never as success."""
+    resp = client.post("/api/runs", json={"requirement": REQUIREMENT})
+    detail = _wait_for(client, resp.json()["run_id"])
+    assert detail["status"] == "blocked", detail
+    assert detail["error"]
 
 
 def test_run_rejects_short_requirement(client):
@@ -75,13 +89,13 @@ def test_missing_run_returns_404(client):
     assert client.get("/api/runs/does-not-exist").status_code == 404
 
 
-def test_list_runs_includes_created_run(client):
+def test_list_runs_includes_created_run(client, fake_pipeline):
     created = client.post("/api/runs", json={"requirement": REQUIREMENT}).json()
     ids = [r["run_id"] for r in client.get("/api/runs").json()]
     assert created["run_id"] in ids
 
 
-def test_events_endpoint_replays_history(client):
+def test_events_endpoint_replays_history(client, fake_pipeline):
     run_id = client.post("/api/runs", json={"requirement": REQUIREMENT}).json()["run_id"]
     _wait_for(client, run_id)
     with client.stream("GET", f"/api/runs/{run_id}/events") as resp:
@@ -95,11 +109,11 @@ def test_events_endpoint_replays_history(client):
     assert seqs == sorted(seqs), "events must be ordered"
 
 
-def test_artifact_download_and_traversal_blocked(client):
+def test_artifact_download_and_traversal_blocked(client, fake_pipeline):
     run_id = client.post("/api/runs", json={"requirement": REQUIREMENT}).json()["run_id"]
     _wait_for(client, run_id)
 
-    ok = client.get(f"/api/runs/{run_id}/artifacts/code/main.py")
+    ok = client.get(f"/api/runs/{run_id}/artifacts/code/app.py")
     assert ok.status_code == 200
     assert "FastAPI" in ok.text
 
@@ -110,14 +124,14 @@ def test_artifact_download_and_traversal_blocked(client):
         assert client.get(f"/api/runs/{run_id}/artifacts/{attempt}").status_code == 404
 
 
-def test_delete_run_removes_it(client):
+def test_delete_run_removes_it(client, fake_pipeline):
     run_id = client.post("/api/runs", json={"requirement": REQUIREMENT}).json()["run_id"]
     _wait_for(client, run_id)
     assert client.delete(f"/api/runs/{run_id}").status_code == 204
     assert client.get(f"/api/runs/{run_id}").status_code == 404
 
 
-def test_ablation_flags_are_honoured(client):
+def test_ablation_flags_are_honoured(client, fake_pipeline):
     run_id = client.post(
         "/api/runs",
         json={"requirement": REQUIREMENT, "skip_reviewer": True},
