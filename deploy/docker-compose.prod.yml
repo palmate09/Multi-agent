@@ -2,6 +2,7 @@
 #   Caddy (TLS + static SPA fallback) -> frontend (nginx, serves built assets)
 #                                                 -> backend (FastAPI)
 # Run artifacts live on a named volume; /data/runs is NOT exposed to the host.
+# Must differ from the root docker-compose.yml (see the note there).
 name: multi-agent-team
 
 services:

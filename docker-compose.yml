@@ -1,7 +1,11 @@
 # Development stack: Vite dev server (HMR) + API with live source mounts.
 # Production stack (built images, no source mounts) lives in
 # deploy/docker-compose.prod.yml.
-name: multi-agent-team
+# Must differ from deploy/docker-compose.prod.yml. Compose identifies a stack
+# by project name, so sharing one makes `docker compose up` silently replace the
+# production containers: Caddy then proxies to the Vite dev server, which does
+# not listen on 8080, and every page returns 502.
+name: multi-agent-team-dev
 
 services:
   backend:
