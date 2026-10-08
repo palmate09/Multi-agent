@@ -1,8 +1,35 @@
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local venvs
 .venv/
-outputs/*/
-!outputs/.gitkeep
-outputs/llm_log.jsonl
+venv/
+
+# Run artifacts and local data
+outputs/
+data/
 *.db
+*.sqlite3
+
+# LLM call log
+llm_log.jsonl
+
+# Frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Secrets — commit .env.example only
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+# TS incremental build cache
+*.tsbuildinfo

@@ -1,0 +1,44 @@
+# HTTPS Caddy config using Caddy's *internal* certificate authority.
+#
+# Use this when you have no domain name: Caddy issues a certificate for the
+# server's IP from a local CA. Browsers will warn until you trust that CA on
+# the client. To fetch the root after first start:
+#
+#   docker compose -f deploy/docker-compose.prod.yml exec caddy \
+#     wget -qO- https://caddy:8443/pki/ca.crt > caddy-root.crt
+#
+# Once you own a domain, delete this file, point an A record at the VM and set
+# SITE_ADDRESS=https://your.domain -- Caddy provisions a real Let's Encrypt cert.
+
+{
+	admin off
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+:80 {
+	redir https://{host}{uri} permanent
+}
+
+:443 {
+	tls internal
+
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+
+	reverse_proxy frontend:8080 {
+		flush_interval -1
+	}
+}

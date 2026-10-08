@@ -1,0 +1,67 @@
+# Development stack: Vite dev server (HMR) + API with live source mounts.
+# Production stack (built images, no source mounts) lives in
+# deploy/docker-compose.prod.yml.
+name: multi-agent-team
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+    environment:
+      ENVIRONMENT: development
+      DEBUG: "true"
+      RUNS_DIR: /data/runs
+      # Leave unset to use local Ollama when reachable; set to 1 to force templates.
+      SKIP_OLLAMA: "${SKIP_OLLAMA:-}"
+      OLLAMA_URL: "${OLLAMA_URL:-http://host.docker.internal:11434}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-qwen2.5-coder:7b-instruct-q4_K_M}"
+      CORS_ORIGINS: "http://localhost:5173"
+      MAX_CONCURRENT_RUNS: "2"
+      SANDBOX_USE_DOCKER: "false"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      GROQ_API_KEY: "${GROQ_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - runs-data:/data/runs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+    restart: unless-stopped
+
+  frontend:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install --no-audit --no-fund && npm run dev -- --host 0.0.0.0"
+    environment:
+      VITE_BACKEND_URL: http://backend:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - frontend-modules:/app/node_modules
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  runs-data:
+  frontend-modules:

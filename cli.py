@@ -4,7 +4,11 @@ import argparse
 import json
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+ROOT = Path(__file__).resolve().parent
+BACKEND = ROOT / "backend"
+sys.path.insert(0, str(BACKEND))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 def main():
     ap = argparse.ArgumentParser()
@@ -25,7 +29,7 @@ def main():
     if args.eval:
         from graph.workflow import run_team
         from evals.metrics import summarize_run
-        suite = json.loads(Path("evals/requirements_suite.json").read_text())
+        suite = json.loads((BACKEND / "evals" / "requirements_suite.json").read_text())
         rows = []
         for item in suite:
             d = f"outputs/eval_{item['id']}"
@@ -33,7 +37,7 @@ def main():
                      skip_tester=args.no_tester, skip_reviewer=args.no_reviewer)
             rows.append(summarize_run(d))
         Path("outputs").mkdir(exist_ok=True)
-        Path("evals/results.json").write_text(json.dumps(rows, indent=2))
+        (BACKEND / "evals" / "results.json").write_text(json.dumps(rows, indent=2))
         print(json.dumps(rows, indent=2))
         return
     req = args.run or "Build a REST API for managing tasks with SQLite persistence."

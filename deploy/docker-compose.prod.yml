@@ -1,0 +1,107 @@
+# Production stack for a single GCP VM.
+#   Caddy (TLS + static SPA fallback) -> frontend (nginx, serves built assets)
+#                                                 -> backend (FastAPI)
+# Run artifacts live on a named volume; /data/runs is NOT exposed to the host.
+name: multi-agent-team
+
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SITE_ADDRESS: "${SITE_ADDRESS:-:80}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - frontend
+    networks: [edge]
+
+  frontend:
+    image: "${REGISTRY:-ghcr.io/yourorg}/multi-agent-frontend:${TAG:-latest}"
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks: [edge]
+
+  backend:
+    image: "${REGISTRY:-ghcr.io/yourorg}/multi-agent-backend:${TAG:-latest}"
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "false"
+      RUNS_DIR: /data/runs
+      # Ollama runs on the host; reach it over the docker bridge gateway.
+      OLLAMA_URL: "${OLLAMA_URL:-http://host.docker.internal:11434}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-qwen2.5-coder:7b-instruct-q4_K_M}"
+      SKIP_OLLAMA: "${SKIP_OLLAMA:-0}"
+      MAX_CONCURRENT_RUNS: "${MAX_CONCURRENT_RUNS:-2}"
+      MAX_REQUIREMENT_CHARS: "8000"
+      RUN_TIMEOUT_SECONDS: "3600"
+      # Generated code is executed by pytest in a subprocess. Docker is not
+      # available inside this container, so the local fallback runs; see
+      # docs/DEPLOY.md for the isolation trade-off.
+      SANDBOX_USE_DOCKER: "${SANDBOX_USE_DOCKER:-false}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      GROQ_API_KEY: "${GROQ_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      HF_TOKEN: "${HF_TOKEN:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+    volumes:
+      - runs-data:/data/runs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+    networks: [edge]
+
+  # Optional: bring your own LLM on the VM. Enable with:
+  #   docker compose -f deploy/docker-compose.prod.yml --profile ollama up -d
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: "30m"
+    # No published port: the backend reaches it over the internal network.
+    networks: [edge]
+
+networks:
+  edge:
+    driver: bridge
+
+volumes:
+  runs-data:
+  caddy-data:
+  caddy-config:
+  ollama-models:
