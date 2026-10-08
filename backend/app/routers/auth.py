@@ -1,9 +1,11 @@
 """Login/logout/session endpoints."""
+
 from __future__ import annotations
 
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app import auth
@@ -41,7 +43,7 @@ def me(request: Request) -> SessionInfo:
         username=user,
         auth_enabled=cfg.enabled,
         # The SPA needs the CSRF value to make writes.
-        csrf_token=request.cookies.get(auth._CSRF_COOKIE) if user else None,
+        csrf_token=request.cookies.get(auth.CSRF_COOKIE) if user else None,
     )
 
 
@@ -85,7 +87,10 @@ def login(payload: LoginRequest, request: Request, response: Response) -> Sessio
 
 
 @router.post("/logout")
-def logout(response: Response) -> Response:
+def logout() -> Response:
+    # Build a real response rather than returning FastAPI's injected bare
+    # Response, whose status_code is still None at that point.
+    response = JSONResponse({"authenticated": False})
     clear_session_cookies(response)
     return response
 

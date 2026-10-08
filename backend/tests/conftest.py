@@ -10,6 +10,10 @@ import os
 
 os.environ.setdefault("SKIP_OLLAMA", "1")
 os.environ.setdefault("AGENT_TEAM_TESTING", "1")
+# A developer's .env must never influence a test run: a stray AUTH_PASSWORD_HASH
+# in the working tree would silently enable auth (or break it) for every test.
+# python-dotenv honours this flag to skip loading entirely.
+os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 
 import sys
 from pathlib import Path

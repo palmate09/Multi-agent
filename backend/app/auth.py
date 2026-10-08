@@ -11,6 +11,7 @@ Design notes:
   invalidate every session at once.
 * An optional API key allows headless access (``X-API-Key``) for scripting.
 """
+
 from __future__ import annotations
 
 import base64
@@ -31,7 +32,7 @@ log = logging.getLogger("app.auth")
 SESSION_COOKIE = "mat_session"
 SESSION_MAX_AGE = 60 * 60 * 12  # 12 hours
 CSRF_HEADER = "X-CSRF-Token"
-_CSRF_COOKIE = "mat_csrf"
+CSRF_COOKIE = "mat_csrf"
 
 _SCRYPT_N = 2**14
 _SCRYPT_R = 8
@@ -43,7 +44,15 @@ _SCRYPT_DKLEN = 32
 # password hashing
 # --------------------------------------------------------------------------
 def hash_password(password: str) -> str:
-    """Return ``scrypt$n$r$p$<salt>$<digest>`` with a fresh random salt."""
+    """Return ``scrypt.n.r.p.<salt>.<digest>`` with a fresh random salt.
+
+    The separator is a dot, not a dollar sign. Docker Compose treats ``$`` in
+    an interpolated value as a variable reference, so a ``$``-delimited hash is
+    silently corrupted when it travels through ``.env`` — which would make
+    every login fail on a deployed host. The base64 alphabet
+    (A-Z a-z 0-9 + / =) contains neither ``$`` nor ``.``, so this format is safe
+    to interpolate.
+    """
     if len(password) < 8:
         raise ValueError("password must be at least 8 characters")
     salt = secrets.token_bytes(16)
@@ -55,19 +64,21 @@ def hash_password(password: str) -> str:
         p=_SCRYPT_P,
         dklen=_SCRYPT_DKLEN,
     )
-    return "scrypt${}${}${}${}${}".format(
-        _SCRYPT_N,
-        _SCRYPT_R,
-        _SCRYPT_P,
+    parts = (
+        "scrypt",
+        str(_SCRYPT_N),
+        str(_SCRYPT_R),
+        str(_SCRYPT_P),
         base64.b64encode(salt).decode(),
         base64.b64encode(digest).decode(),
     )
+    return ".".join(parts)
 
 
 def verify_password(password: str, stored: str) -> bool:
     """Constant-time verification. Never raises on malformed input."""
     try:
-        scheme, n, r, p, salt_b64, digest_b64 = stored.split("$")
+        scheme, n, r, p, salt_b64, digest_b64 = stored.split(".")
         if scheme != "scrypt":
             return False
         salt = base64.b64decode(salt_b64)
@@ -96,6 +107,15 @@ class AuthConfig:
     """Resolved auth configuration for one app instance."""
 
     def __init__(self) -> None:
+        # Load .env here rather than relying on some other module's
+        # load_dotenv() side effect: auth must not depend on import order.
+        try:
+            from dotenv import load_dotenv
+
+            load_dotenv()
+        except Exception:
+            pass
+
         self.enabled = False
         self.username = os.getenv("AUTH_USERNAME", "admin")
         self.secret = os.getenv("AUTH_SECRET", "")
@@ -150,7 +170,6 @@ def _serializer() -> URLSafeTimedSerializer:
 
 def issue_session(username: str) -> tuple[str, str]:
     """Return ``(session_token, csrf_token)``."""
-    cfg = get_auth_config()
     token = _serializer().dumps({"u": username, "n": secrets.token_urlsafe(8)})
     csrf = secrets.token_urlsafe(32)
     return token, csrf
@@ -165,7 +184,7 @@ def read_session(token: str) -> dict | None:
         return None
     except BadSignature:
         return None
-    except Exception:  # noqa: BLE001 - never leak internals to the client
+    except Exception:
         log.exception("session decode failed")
         return None
 
@@ -281,14 +300,14 @@ def set_session_cookies(response, token: str, csrf: str) -> None:
         SESSION_COOKIE,
         token,
         max_age=cfg.max_age,
-        httponly=True,   # not readable from JS: reduces XSS impact
-        secure=secure,   # requires HTTPS
+        httponly=True,  # not readable from JS: reduces XSS impact
+        secure=secure,  # requires HTTPS
         samesite="strict",  # not sent on cross-site requests
         path="/",
     )
     # Readable by JS on purpose: the SPA echoes it back in the CSRF header.
     response.set_cookie(
-        _CSRF_COOKIE,
+        CSRF_COOKIE,
         csrf,
         max_age=cfg.max_age,
         httponly=False,
@@ -300,4 +319,4 @@ def set_session_cookies(response, token: str, csrf: str) -> None:
 
 def clear_session_cookies(response) -> None:
     response.delete_cookie(SESSION_COOKIE, path="/")
-    response.delete_cookie(_CSRF_COOKIE, path="/")
+    response.delete_cookie(CSRF_COOKIE, path="/")
