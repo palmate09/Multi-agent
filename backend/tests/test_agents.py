@@ -447,3 +447,54 @@ def test_tester_prompt_forbids_over_specified_error_bodies(monkeypatch):
     sop = tester.SOP
     assert "shape of an error body" in sop
     assert "status code" in sop
+
+
+def test_triage_routes_impossible_error_assertion_to_the_tester(monkeypatch):
+    """A test demanding 4xx for a request that legitimately returns 200.
+
+    Real signature from a deployed run: the suite did GET /appointments/ and
+    asserted 4xx, but a trailing-slash request on a collection is a valid list
+    request. No implementation can satisfy it.
+    """
+    monkeypatch.setattr(pm, "require", lambda *a, **k: ("code_bug", {"ok": True}))
+    from schemas.messages import TestFailure, TestReport
+
+    report = TestReport(
+        passed=9,
+        failed=1,
+        failures=[
+            TestFailure(
+                name="test_get_appointment_by_id_boundary_empty_string",
+                error=(
+                    "assert 400 <= resp.status_code < 500\n"
+                    "E  assert 400 <= 200\n"
+                    "E   + where 200 = <Response [200 OK]>.status_code"
+                ),
+            )
+        ],
+    )
+    assert pm.triage(report) == "test_bug"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "sqlalchemy.exc.OperationalError: no such table: appointments",
+        "ModuleNotFoundError: No module named 'models'",
+        "AssertionError: assert 404 == 200",
+        "AssertionError: assert 201 == 200",
+        "AttributeError: 'NoneType' object has no attribute 'id'",
+    ],
+)
+def test_triage_never_misroutes_real_code_bugs(monkeypatch, error):
+    """The deterministic signatures must not swallow genuine code bugs."""
+    monkeypatch.setattr(pm, "require", lambda *a, **k: ("code_bug", {"ok": True}))
+    from schemas.messages import TestFailure, TestReport
+
+    report = TestReport(passed=9, failed=1, failures=[TestFailure(name="t", error=error)])
+    assert pm.triage(report) == "code_bug", error
+
+
+def test_tester_prompt_forbids_impossible_error_assertions():
+    assert "must be satisfiable" in tester.SOP
+    assert "valid list request and returns" in tester.SOP

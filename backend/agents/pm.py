@@ -8,6 +8,7 @@ stories. There is no template now: a failure raises and the run is blocked.
 from __future__ import annotations
 
 import json
+import re
 
 from agents.llm import GenerationError, require
 from schemas.messages import TestReport, UserStories, UserStory
@@ -100,6 +101,18 @@ _WEAK_TEST_BUG = (
     "test bug",
 )
 
+# A test asserting an error status where the app returned a success status. The
+# request was valid, so the expectation is impossible to satisfy. Seen in a real
+# run where the suite did GET /appointments/ and demanded 4xx, while a
+# trailing-slash request on a collection is a legitimate list request returning
+# 200. Routing that to the Developer sends it "fixing" correct code.
+_2XX_VS_ERROR_ASSERT = re.compile(
+    r"assert\s+4\d\d\s*(?:<=|==)\s*resp(?:onse)?\.?status_code"  # assert 4xx <= resp.status_code
+    r"|assert\s+resp(?:onse)?\.?status_code\s*(?:<|<=)\s*500"
+    r"|= <Response \[2\d\d",
+    re.I,
+)
+
 
 def triage(report: TestReport) -> str:
     """Return ``code_bug`` or ``test_bug``.
@@ -121,6 +134,11 @@ def triage(report: TestReport) -> str:
         # unambiguous, and the model previously talked itself out of it: a real
         # run rewrote correct code four times because it judged a
         # status-code-correct response "code_bug".
+        return "test_bug"
+
+    if enough_passing and _2XX_VS_ERROR_ASSERT.search(blob):
+        # The app answered 2xx to a valid request while the test insisted on an
+        # error status. No implementation can satisfy that.
         return "test_bug"
 
     verdict = (

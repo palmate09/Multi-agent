@@ -33,11 +33,17 @@ SOP = (
     "- Do not assert on the *shape of an error body* (keys like 'error' or 'detail', message "
     "wording). The spec fixes the status code, not the envelope. `assert response.status_code "
     "== 404` is correct; `assert 'error' in response.json()` is not.\n"
+    "- Only assert a 4xx status for a request the spec declares invalid: an unknown id, a "
+    "missing required field, a blank value. A request that is genuinely valid must be asserted "
+    "to SUCCEED. `GET /appointments/` with a trailing slash is a valid list request and returns "
+    "200; asserting it fails is an impossible test.\n"
     "- Do not assert an exact status code the spec does not declare. FastAPI answers 422 for a "
     "schema violation where a hand-written API might answer 400; assert only codes the spec "
-    "names, or assert the code is a 4xx client error.\n"
+    "names, or assert the code is a 4xx client error for a request you have already made "
+    "invalid.\n"
     "- Prefer asserting on data the spec describes (fields, ids, counts) over incidental "
     "response keys.\n"
+    "Every test you write must be satisfiable by a correct implementation of this spec.\n"
     "Output ONE fenced ```python block containing only the test file. No prose."
 )
 
