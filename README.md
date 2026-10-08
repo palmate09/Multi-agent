@@ -43,23 +43,62 @@ python cli.py --eval
 
 ## Web UI
 
-```bash
-docker compose up --build       # UI on :5173, API on :8000
-```
-
-Or production-shaped (built images, Caddy, read-only frontend):
+One command. It generates credentials if `.env` is missing, prints the
+password once, and starts the stack:
 
 ```bash
-printf 'REGISTRY=local/mat\nTAG=latest\nSITE_ADDRESS=:80\nSKIP_OLLAMA=1\n' > .env
+./deploy/bootstrap-env.sh
 docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d --build
-open http://localhost
+open http://localhost          # sign in with the password it printed
 ```
+
+`bootstrap-env.sh` is idempotent — it keeps any credentials you already have
+and only fills in what is missing.
+
+For hot-reloading development instead (Vite dev server, API on `:8000`):
+
+```bash
+docker compose up            # UI on :5173
+```
+
+Dev leaves auth **off**, even if `deploy/bootstrap-env.sh` has written a
+production `.env` in the repo root (Compose loads that file automatically). To
+exercise the login flow locally, opt in explicitly:
+
+```bash
+DEV_AUTH_USERNAME=admin \
+DEV_AUTH_SECRET=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))') \
+DEV_AUTH_PASSWORD_HASH=$(python3 backend/scripts/gen_auth.py 'dev-pass' | sed -n 's/^AUTH_PASSWORD_HASH=//p') \
+  docker compose up
+```
+
+Change a lost password with `./deploy/bootstrap-env.sh --reset-password`, then
+recreate the backend container.
+
+### If nothing shows up
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.prod.yml ps   # all three must be Up
+docker compose --env-file .env -f deploy/docker-compose.prod.yml logs --tail=50 frontend
+curl -s localhost/health
+```
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `error while interpolating ... AUTH_SECRET is missing` | no credentials in `.env` | run `./deploy/bootstrap-env.sh` |
+| Containers never created | compose refused to start | read the error above; it names the missing key |
+| `frontend` restarting, `host not found in upstream "backend"` | services on different networks | both must be on the `edge` network |
+| SPA loads but every API call 401s | not signed in, or expired session | sign in again; check `AUTH_SESSION_HOURS` |
+| `bind: address already in use` | port 80 or 5173 taken | `./deploy/stop.sh`, or change `SITE_ADDRESS` |
+| Works locally, blank from another machine | firewall | open the port, see `docs/DEPLOY.md` §1 |
 
 ## Authentication
 
 Session-cookie login with a scrypt-hashed password, plus an API key for
 headless access. Every `/api/*` route and the UI are gated; only `/health` and
 the auth endpoints are public.
+
+`deploy/bootstrap-env.sh` handles this for you. To manage credentials by hand:
 
 ```bash
 python backend/scripts/gen_auth.py     # prints hash + secret + API key

@@ -131,7 +131,13 @@ healthcheck and uptime probes keep working.
 
 ### Generate credentials
 
-On your laptop (or the VM):
+The scripted path, which is what you want almost always:
+
+```bash
+./deploy/bootstrap-env.sh     # writes .env, prints the password once
+```
+
+Or by hand:
 
 ```bash
 python backend/scripts/gen_auth.py            # random password
@@ -148,6 +154,14 @@ AUTH_PASSWORD_HASH=scrypt.16384.8.1.<salt>.<digest>
 AUTH_API_KEY=mat_<random>
 AUTH_COOKIE_SECURE=0
 AUTH_SESSION_HOURS=12
+```
+
+`bootstrap-env.sh` is idempotent: it preserves existing values and fills in only
+what is missing. To change a lost password:
+
+```bash
+./deploy/bootstrap-env.sh --reset-password 'new-password'
+docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d
 ```
 
 > **The hash separator is a dot, not a `$`.** This is deliberate: Docker Compose
