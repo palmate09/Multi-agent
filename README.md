@@ -55,6 +55,20 @@ docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d --build
 open http://localhost
 ```
 
+## Authentication
+
+Session-cookie login with a scrypt-hashed password, plus an API key for
+headless access. Every `/api/*` route and the UI are gated; only `/health` and
+the auth endpoints are public.
+
+```bash
+python backend/scripts/gen_auth.py     # prints hash + secret + API key
+```
+
+Paste the output into `.env` (or the VM's `/opt/multi-agent-team/.env`).
+Production compose refuses to start without `AUTH_SECRET` and
+`AUTH_PASSWORD_HASH`. Details, rotation and CSRF behaviour: `docs/DEPLOY.md` §4a.
+
 ## LLM backends
 
 Local Ollama first, then free hosted tiers, then deterministic templates.
@@ -114,5 +128,9 @@ run_all.sh   run every phase gate in order
 
 * Template mode covers task-manager CRUD only; novel domains need an LLM backend.
 * SWE-bench Lite is a stretch goal, not yet run.
-* No authentication: anyone who can reach the UI can start runs.
-* Production runs the sandbox as a local subprocess (no network isolation).
+* One shared operator account, not per-user accounts.
+* Sessions are stateless, so logout clears the cookie but a copied cookie stays
+  valid until it expires.
+* Production runs the sandbox as a local subprocess, so generated code executes
+  with the API's network access and no isolation. Auth is not a substitute for
+  sandboxing.

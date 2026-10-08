@@ -113,14 +113,98 @@ On the VM:
 
 ```bash
 cd ~/app
-printf 'REGISTRY=ghcr.io/OWNER\nTAG=latest\nSITE_ADDRESS=:80\nSKIP_OLLAMA=1\n' > .env
+printf 'REGISTRY=ghcr.io/OWNER\nTAG=latest\nSITE_ADDRESS=:80\n' > .env
 docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d --build
 docker compose --env-file .env -f deploy/docker-compose.prod.yml ps
 curl -s localhost/health | jq
 ```
 
-Expect three services: `caddy`, `frontend`, `backend` (healthy). Then browse
-`http://$IP`.
+The compose file **requires** `AUTH_SECRET` and `AUTH_PASSWORD_HASH`; it refuses
+to start without them (see section 4a). Expect three services: `caddy`,
+`frontend`, `backend` (healthy). Then browse `http://$IP` and sign in.
+
+## 4a. Authentication
+
+The UI and every `/api/*` route require a session. There is no anonymous access
+to runs, and `/health` plus `/api/auth/*` are the only public paths — the
+healthcheck and uptime probes keep working.
+
+### Generate credentials
+
+On your laptop (or the VM):
+
+```bash
+python backend/scripts/gen_auth.py            # random password
+python backend/scripts/gen_auth.py 'my-pass'  # or a chosen one
+```
+
+It prints an scrypt hash, a signing secret, and an API key. Append to the VM's
+`.env`:
+
+```
+AUTH_USERNAME=admin
+AUTH_SECRET=<64-char random string>
+AUTH_PASSWORD_HASH=scrypt.16384.8.1.<salt>.<digest>
+AUTH_API_KEY=mat_<random>
+AUTH_COOKIE_SECURE=0
+AUTH_SESSION_HOURS=12
+```
+
+> **The hash separator is a dot, not a `$`.** This is deliberate: Docker Compose
+> treats `$` in an interpolated value as a variable reference, so a
+> `$`-delimited hash arrives corrupted and every login fails. `python-dotenv` is
+> not involved — this is Compose's own interpolation of the `environment:` block.
+> There is a regression test (`test_password_hash_survives_compose_interpolation`)
+> pinning the format.
+
+Never commit `.env`; it is gitignored. If you rotate `AUTH_PASSWORD_HASH` or
+`AUTH_SECRET`, all existing sessions stop working immediately.
+
+### How it works
+
+- Passwords: `hashlib.scrypt` (stdlib, memory-hard) with a per-password random
+  salt, verified with `hmac.compare_digest`.
+- Sessions: stateless signed cookies (`itsdangerous`), `HttpOnly` +
+  `SameSite=strict`, 12-hour expiry. There is no server-side session store, so
+  **logout only clears the browser's cookie** — a stolen cookie remains valid
+  until it expires. Rotating `AUTH_SECRET` revokes all of them at once.
+- CSRF: double-submit token. The SPA reads the non-`HttpOnly` `mat_csrf` cookie
+  and echoes it in `X-CSRF-Token` on every write. Enforced centrally in
+  middleware, so a route added later is covered automatically.
+- Login throttling: 5 failures per client IP in 5 minutes → 15-minute block.
+
+### Headless access
+
+```bash
+curl -H "X-API-Key: $AUTH_API_KEY" http://$IP/api/runs
+curl -H "X-API-Key: $AUTH_API_KEY" -X POST http://$IP/api/runs \
+  -H 'Content-Type: application/json' \
+  -d '{"requirement":"Build a task manager REST API with CRUD /tasks"}'
+```
+
+API-key callers skip the CSRF check, since they are not browsers.
+
+### Verify it is actually enforced
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://$IP/api/runs        # 401
+curl -s -o /dev/null -w '%{http_code}\n' http://$IP/health          # 200
+curl -s -c /tmp/j -X POST http://$IP/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d "{\"username\":\"$AUTH_USERNAME\",\"password\":\"$PASS\"}"
+curl -s -b /tmp/j -o /dev/null -w '%{http_code}\n' http://$IP/api/runs  # 200
+```
+
+### Serving over plain HTTP
+
+Session cookies are set with `Secure` off by default because the initial
+deployment is `http://$IP`. That means the password and cookie travel in
+cleartext on the wire. Once TLS is up (section 6), set
+`AUTH_COOKIE_SECURE=1` and recreate the container, or the browser will refuse to
+store the session.
+
+Do not leave a public deployment on plain HTTP. Restrict the firewall to your
+IP (section 8) until TLS is in place.
 
 ## 5. Automated deploys
 
@@ -283,6 +367,14 @@ Keep 22 open to your IP or you will lock yourself out.
 
 ## 9. Known limitations
 
+**Authentication is a single shared password, not per-user accounts.** One
+operator account plus an API key. Fine for a personal tool; if several people
+need access, add real user records and per-run ownership first.
+
+**Sessions are stateless.** Logout clears the local cookie; a copied cookie
+stays valid for up to `AUTH_SESSION_HOURS`. Rotate `AUTH_SECRET` to revoke
+everything immediately.
+
 **The sandbox is not isolated in this topology.** `sandbox/runner.py` has a
 Docker path (no network, 512 MB, 1 CPU) and a local-subprocess fallback. Inside
 the backend container Docker is not available, so production runs the fallback:
@@ -304,8 +396,9 @@ The backend container has no Docker socket mount, so it cannot use the daemon to
 escape. But it does have outbound network access, and generated code runs
 arbitrary Python inside it.
 
-**No authentication.** Anyone who can reach the UI can start runs, which execute
-generated code. Add auth before this faces the internet.
+**The generated-code sandbox still runs with the API's privileges.** Auth means
+only an authenticated operator can start a run; it does not sandbox the code that
+run executes. See above.
 
 **In-memory run registry.** Run metadata lives in the process; only the artifact
 directories survive a restart (`rehydrate()` picks them up). Fine for a single
