@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+outputs/*/
+!outputs/.gitkeep
+outputs/llm_log.jsonl
+*.db
+.env

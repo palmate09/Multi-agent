@@ -1,0 +1,8 @@
+[
+  {"id": "task-manager", "file": "task-manager.md",
+   "requirement": "Build a REST API for managing tasks with SQLite persistence. Endpoints: GET /health, CRUD /tasks with title validation (422 on empty), 404 on unknown id."},
+  {"id": "task-manager-filter", "file": "task-manager.md",
+   "requirement": "Build a task manager REST API with CRUD /tasks plus GET /tasks?done=true filter. Same validation (422/404) and /health."},
+  {"id": "task-manager-notes", "file": "task-manager.md",
+   "requirement": "Build a task manager REST API with CRUD /tasks plus a notes field on tasks. Same validation (422/404) and /health."}
+]
