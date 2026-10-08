@@ -11,16 +11,21 @@
 # generated password is printed once and never stored in plain text.
 set -euo pipefail
 
+RESET_REQUESTED=0
 RESET_PASSWORD=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --reset-password)
-      RESET_PASSWORD="${2:-}"
-      shift 2 || shift
+      RESET_REQUESTED=1
+      if [ $# -ge 2 ] && [ -n "${2:-}" ] && [ "${2#-}" = "$2" ]; then
+        RESET_PASSWORD="$2"
+        shift
+      fi
       ;;
-    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
+  shift
 done
 
 cd "$(dirname "$0")/.."
@@ -91,8 +96,7 @@ set_key() {
 ensure_deps
 
 PASSWORD=""
-FORCE_RESET=0
-[ -n "$RESET_PASSWORD" ] && FORCE_RESET=1
+FORCE_RESET=$RESET_REQUESTED
 
 if [ "$FORCE_RESET" -eq 1 ]; then
   log "resetting the password"
