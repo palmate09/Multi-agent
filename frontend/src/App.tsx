@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { api, subscribeToRun } from "./api";
+import { api, setUnauthorizedHandler, subscribeToRun } from "./api";
 import type { Health, PipelineEvent, RunDetail, RunSummary } from "./types";
 import { statusTone } from "./types";
 import { EvalPanel } from "./components/EvalPanel";
 import { FileViewer } from "./components/FileViewer";
+import { LoginPage } from "./components/LoginPage";
 import { PipelineTimeline } from "./components/PipelineTimeline";
 import { RequirementForm } from "./components/RequirementForm";
 import { RunList } from "./components/RunList";
@@ -24,6 +25,14 @@ const TABS: Array<{ id: Tab; label: string }> = [
 const POLL_MS = 1500;
 
 export default function App() {
+  // "checking" until we know whether a session exists, so we never flash the
+  // app to an unauthenticated user.
+  const [authState, setAuthState] = useState<"checking" | "in" | "out">("checking");
+  const [authEnabled, setAuthEnabled] = useState(true);
+  const [username, setUsername] = useState<string | null>(null);
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+
   const [health, setHealth] = useState<Health | null>(null);
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -52,11 +61,63 @@ export default function App() {
     }
   }, []);
 
+  // Establish the session once on mount.
   useEffect(() => {
+    api
+      .session()
+      .then((s) => {
+        setAuthEnabled(s.auth_enabled);
+        setUsername(s.username);
+        setAuthState(s.authenticated ? "in" : "out");
+      })
+      .catch(() => setAuthState("out"));
+  }, []);
+
+  // Any 401 from anywhere drops us back to the login screen.
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setAuthState("out");
+      setSelected(null);
+      setDetail(null);
+      setRuns([]);
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  const handleLogin = async (user: string, pass: string) => {
+    setLoginBusy(true);
+    setLoginError(null);
+    try {
+      const s = await api.login(user, pass);
+      setAuthEnabled(s.auth_enabled);
+      setUsername(s.username);
+      setAuthState("in");
+    } catch (e) {
+      setLoginError(e instanceof Error ? e.message : "Sign-in failed");
+    } finally {
+      setLoginBusy(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await api.logout();
+    } catch {
+      /* the cookie is cleared either way */
+    }
+    setAuthState("out");
+    setSelected(null);
+    setDetail(null);
+    setRuns([]);
+  };
+
+  // Load dashboard data once authenticated.
+  useEffect(() => {
+    if (authState !== "in") return;
     refreshHealth();
     refreshRuns();
     api.evals().then(setEvals).catch(() => undefined);
-  }, [refreshHealth, refreshRuns]);
+  }, [authState, refreshHealth, refreshRuns]);
 
   const loadDetail = useCallback(async (id: string) => {
     try {
@@ -167,6 +228,20 @@ export default function App() {
         : "no LLM backend"
     : "connecting…";
 
+  if (authState === "checking") {
+    return (
+      <div className="app">
+        <div className="empty" style={{ marginTop: 80 }}>
+          Checking session…
+        </div>
+      </div>
+    );
+  }
+
+  if (authState === "out" && authEnabled) {
+    return <LoginPage onLogin={handleLogin} error={loginError} busy={loginBusy} />;
+  }
+
   return (
     <div className="app">
       <header className="topbar">
@@ -177,6 +252,17 @@ export default function App() {
           <span className="dot" />
           {llmLabel}
         </span>
+        {authEnabled && username && (
+          <>
+            <span className="badge idle" title={`signed in as ${username}`}>
+              <span className="dot" />
+              {username}
+            </span>
+            <button className="ghost" onClick={() => void handleLogout()}>
+              Sign out
+            </button>
+          </>
+        )}
         <span className="sub">v{health?.version ?? "—"}</span>
       </header>
 

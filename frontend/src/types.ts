@@ -63,6 +63,13 @@ export interface RunDetail extends RunSummary {
   memory: string[];
 }
 
+export interface SessionInfo {
+  authenticated: boolean;
+  username: string | null;
+  auth_enabled: boolean;
+  csrf_token: string | null;
+}
+
 export interface LlmStatus {
   ollama_reachable: boolean;
   ollama_models: string[];
