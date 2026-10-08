@@ -22,6 +22,13 @@ services:
       RUNS_DIR: /data/runs
       # Leave unset to use local Ollama when reachable; set to 1 to force templates.
       SKIP_OLLAMA: "${SKIP_OLLAMA:-}"
+      # Auth is optional in dev: unset these and the API is open, which is handy
+      # for local iteration but never appropriate for a deployed host.
+      AUTH_USERNAME: "${AUTH_USERNAME:-}"
+      AUTH_SECRET: "${AUTH_SECRET:-}"
+      AUTH_PASSWORD_HASH: "${AUTH_PASSWORD_HASH:-}"
+      AUTH_API_KEY: "${AUTH_API_KEY:-}"
+      AUTH_COOKIE_SECURE: "${AUTH_COOKIE_SECURE:-0}"
       OLLAMA_URL: "${OLLAMA_URL:-http://host.docker.internal:11434}"
       OLLAMA_MODEL: "${OLLAMA_MODEL:-qwen2.5-coder:7b-instruct-q4_K_M}"
       CORS_ORIGINS: "http://localhost:5173"

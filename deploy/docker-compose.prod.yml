@@ -51,7 +51,15 @@ services:
       # Ollama runs on the host; reach it over the docker bridge gateway.
       OLLAMA_URL: "${OLLAMA_URL:-http://host.docker.internal:11434}"
       OLLAMA_MODEL: "${OLLAMA_MODEL:-qwen2.5-coder:7b-instruct-q4_K_M}"
-      SKIP_OLLAMA: "${SKIP_OLLAMA:-0}"
+      SKIP_OLLAMA: "${SKIP_OLLAMA:-1}"
+      # ---- auth (see docs/DEPLOY.md §4) ----
+      AUTH_USERNAME: "${AUTH_USERNAME:-admin}"
+      AUTH_SECRET: "${AUTH_SECRET:?AUTH_SECRET is required; run backend/scripts/gen_auth.py}"
+      AUTH_PASSWORD_HASH: "${AUTH_PASSWORD_HASH:?AUTH_PASSWORD_HASH is required}"
+      AUTH_API_KEY: "${AUTH_API_KEY:-}"
+      AUTH_COOKIE_SECURE: "${AUTH_COOKIE_SECURE:-0}"
+      AUTH_SESSION_HOURS: "${AUTH_SESSION_HOURS:-12}"
+      AUTH_CSRF: "${AUTH_CSRF:-1}"
       MAX_CONCURRENT_RUNS: "${MAX_CONCURRENT_RUNS:-2}"
       MAX_REQUIREMENT_CHARS: "8000"
       RUN_TIMEOUT_SECONDS: "3600"
