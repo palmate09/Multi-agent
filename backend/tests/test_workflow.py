@@ -197,6 +197,48 @@ def test_fix_loop_stops_when_patch_changes_nothing(monkeypatch, tmp_path):
     assert "no change" in st.error
 
 
+def test_fix_loop_reports_llm_outage_honestly(monkeypatch, tmp_path):
+    """A patch call that never reaches the model must not blame the model.
+
+    Regression for run-20261009-132652: Groq 429'd the patch call,
+    patch_code returned the bundle untouched, and the run reported
+    "developer patch produced no change" — hiding the outage.
+    """
+    from agents import designer, developer, pm, reviewer, tester
+    from agents.llm import GenerationError
+    from graph import workflow as Workflow
+    from schemas.messages import CodeBundle, UserStories
+
+    def _boom(*a, **k):
+        raise GenerationError("str HTTP 429")
+
+    monkeypatch.setattr(
+        pm,
+        "requirement_to_stories",
+        lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
+    )
+    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="": _spec_for_library())
+    monkeypatch.setattr(developer, "spec_to_code", lambda spec: _bundle())
+    monkeypatch.setattr(developer, "patch_code", _boom)
+    monkeypatch.setattr(reviewer, "generate", lambda *a, **k: ("", {"ok": False}))
+    monkeypatch.setattr(
+        tester,
+        "spec_to_tests",
+        lambda *a, **k: TestSuite(files={"test_app.py": "def test_x(): assert True\n"}),
+    )
+    failing = TestReport(
+        passed=0,
+        failed=1,
+        failures=[TestFailure(name="test_app.py::test_borrow", error="boom")],
+        raw="",
+    )
+    monkeypatch.setattr(Workflow.Runner, "run_tests", lambda *a, **k: failing)
+    st = run_team(LIBRARY, out_dir=str(tmp_path / "outage"))
+    assert st.status == "unresolved"
+    assert "LLM call failed" in st.error
+    assert "no change" not in st.error
+
+
 def test_fix_loop_applies_a_real_change(monkeypatch, tmp_path):
     from agents import designer, developer, pm, reviewer, tester
     from graph import workflow as Workflow

@@ -401,7 +401,13 @@ def run_team(
         try:
             st.code = Developer.patch_code(st.code, st.report, refl, tests=st.tests, kind=st.spec.kind)
         except GenerationError as exc:
-            log(f"developer patch failed: {exc}")
+            # The model was never reached (rate limit, outage): the bundle is
+            # unchanged but NOT because the model tried and gave up. Say so —
+            # "produced no change" would blame the model and hide the outage.
+            st.status = "unresolved"
+            st.error = f"developer patch LLM call failed ({exc}); re-running later may succeed"
+            emit("developer", "done", {"changed": False, "retry": st.retry_dev, "llm_error": True})
+            break
         if st.code.files == before:
             # An unchanged bundle means every further attempt repeats this one.
             st.status = "unresolved"
@@ -469,7 +475,9 @@ def run_team(
                     kind=st.spec.kind,
                 )
             except GenerationError as exc:
-                log(f"developer review patch failed: {exc}")
+                st.status = "unresolved_review"
+                st.error = f"review patch LLM call failed ({exc}); re-running later may succeed"
+                break
             if st.code.files == before:
                 st.status = "unresolved_review"
                 st.error = "review patch produced no change; stopping instead of looping"
