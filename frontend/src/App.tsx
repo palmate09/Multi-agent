@@ -144,7 +144,7 @@ export default function App() {
         .getRun(selected)
         .then((d) => d.status)
         .catch(() => "unknown");
-      if (current === "queued" || current === "running") {
+      if (current === "queued" || current === "running" || current === "stopping") {
         timer = setTimeout(tick, POLL_MS);
       } else {
         refreshRuns();
@@ -210,6 +210,21 @@ export default function App() {
     }
   };
 
+  const [stopping, setStopping] = useState(false);
+  const stopRun = async (id: string) => {
+    setStopping(true);
+    setError(null);
+    try {
+      await api.stopRun(id);
+      await loadDetail(id);
+      await refreshRuns();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to stop run");
+    } finally {
+      setStopping(false);
+    }
+  };
+
   const events = useMemo<PipelineEvent[]>(() => {
     const fromPoll = detail?.events ?? [];
     const seen = new Set(fromPoll.map((e) => e.seq));
@@ -218,6 +233,8 @@ export default function App() {
   }, [detail, liveEvents]);
 
   const running = detail?.status === "running" || detail?.status === "queued";
+  const stoppingNow = detail?.status === "stopping" || stopping;
+  const stoppable = detail?.status === "running" || detail?.status === "queued";
   const tone = statusTone(detail?.status ?? "idle");
 
   const llmLabel = health
@@ -294,9 +311,25 @@ export default function App() {
                       Run <code>{detail.run_id}</code>
                     </h2>
                     <span className={`badge ${tone}`}>
-                      <span className={`dot${running ? " pulse" : ""}`} />
+                      <span className={`dot${running || stoppingNow ? " pulse" : ""}`} />
                       {detail.status}
                     </span>
+                    {stoppable && (
+                      <button
+                        className="ghost"
+                        style={{ marginLeft: 8 }}
+                        disabled={stopping}
+                        onClick={() => void stopRun(detail.run_id)}
+                        title="Request cancellation; the run settles at cancelled"
+                      >
+                        {stopping ? "Stopping…" : "Stop"}
+                      </button>
+                    )}
+                    {stoppingNow && !stoppable && (
+                      <span className="hint" style={{ marginLeft: 8 }}>
+                        Stopping…
+                      </span>
+                    )}
                     {detail.error && (
                       <span className="hint" style={{ marginLeft: 8 }}>
                         {detail.error}

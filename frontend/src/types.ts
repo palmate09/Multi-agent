@@ -154,5 +154,9 @@ export function statusTone(status: string): "good" | "warn" | "bad" | "idle" {
     return "bad";
   if (status === "running" || status === "queued" || status === "tests_green")
     return "warn";
+  // stopping = stop requested, worker draining to cancelled. cancelled = user
+  // stopped the run; neutral tone, it is neither success nor failure.
+  if (status === "stopping") return "warn";
+  if (status === "cancelled") return "idle";
   return "idle";
 }

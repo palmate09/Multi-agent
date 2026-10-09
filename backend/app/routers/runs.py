@@ -1,4 +1,4 @@
-"""Run lifecycle endpoints: create, list, inspect, stream, delete, artifacts."""
+"""Run lifecycle endpoints: create, list, inspect, stream, stop, delete, artifacts."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from fastapi.responses import Response, StreamingResponse
 from app.config import Settings, get_settings
 from app.dependencies import get_store
 from app.schemas import RunCreate, RunDetail, RunSummary
-from app.services.runs import Run, RunStore
+from app.services.runs import Run, RunningError, RunStore
 
 log = logging.getLogger("app.api.runs")
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -136,6 +136,24 @@ def get_artifact(run_id: str, path: str, store: RunStore = Depends(get_store)) -
 
 @router.delete("/{run_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 def delete_run(run_id: str, store: RunStore = Depends(get_store)):
-    if not store.delete(run_id):
+    try:
+        deleted = store.delete(run_id)
+    except RunningError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if not deleted:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{run_id}/stop")
+def stop_run(run_id: str, store: RunStore = Depends(get_store)) -> dict:
+    """Request cancellation of a queued or running pipeline.
+
+    Cooperative: the worker honours the signal at the next node boundary and
+    the run settles at ``cancelled``. Already-terminal runs answer
+    ``stopped: False`` with their current status (idempotent).
+    """
+    result = store.stop(run_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    return result

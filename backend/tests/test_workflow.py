@@ -403,3 +403,35 @@ def test_boot_failure_enters_the_fix_loop(monkeypatch, tmp_path):
     st = run_team(LIBRARY, out_dir=str(tmp_path / "bootloop"))
     assert st.retry_dev == 1, st.status
     assert st.status == "accepted", st.status
+
+
+def test_cancel_event_stops_run_between_nodes(monkeypatch, tmp_path):
+    """A pre-set cancel event ends the run as cancelled after the first node."""
+    import threading
+
+    from agents import designer, developer, pm, reviewer, tester
+    from graph import workflow as Workflow
+    from schemas.messages import UserStories
+
+    calls = []
+    monkeypatch.setattr(
+        pm,
+        "requirement_to_stories",
+        lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
+    )
+    monkeypatch.setattr(
+        designer,
+        "stories_to_spec",
+        lambda *a, **k: calls.append("designer") or _spec_for_library(),
+    )
+    monkeypatch.setattr(
+        developer, "spec_to_code", lambda spec: calls.append("developer") or _bundle()
+    )
+    monkeypatch.setattr(reviewer, "generate", lambda *a, **k: ("", {"ok": False}))
+
+    ev = threading.Event()
+    ev.set()
+    st = run_team(LIBRARY, out_dir=str(tmp_path / "cancelled"), cancel=ev)
+    assert st.status == "cancelled", st.status
+    assert st.error == "stopped by user"
+    assert "designer" not in calls, "no node after the first boundary may run"

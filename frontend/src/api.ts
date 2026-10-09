@@ -106,6 +106,12 @@ export const api = {
   deleteRun: (runId: string) =>
     request<void>(`/api/runs/${runId}`, { method: "DELETE" }),
 
+  stopRun: (runId: string) =>
+    request<{ run_id: string; stopped: boolean; status: string }>(
+      `/api/runs/${runId}/stop`,
+      { method: "POST", body: JSON.stringify({}) }
+    ),
+
   evals: () => request<EvalResults>("/api/evals/results"),
 };
 

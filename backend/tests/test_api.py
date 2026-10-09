@@ -187,3 +187,67 @@ def test_store_generates_unique_ids(tmp_path, monkeypatch):
     finally:
         store.shutdown()
     get_settings.cache_clear()
+
+
+def _slow_cooperative_run_team(requirement, out_dir, on_event=None, run_id=None, **kw):
+    """Stand-in worker: blocks until cancelled, then reports cancelled."""
+    from schemas.messages import GraphState
+
+    cancel = kw.get("cancel")
+    assert cancel is not None, "worker must receive the cancel event"
+    cancel.wait(20)
+    return GraphState(
+        requirement=requirement,
+        run_id=run_id or "slow",
+        status="cancelled" if cancel.is_set() else "failed",
+        error="stopped by user" if cancel.is_set() else "slow stub was never stopped",
+    )
+
+
+def _wait_for_status(client, run_id, want, timeout=30):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        got = client.get(f"/api/runs/{run_id}").json()["status"]
+        if got == want:
+            return got
+        time.sleep(0.2)
+    raise AssertionError(f"run {run_id} never reached {want}")
+
+
+def test_stop_unknown_run_returns_404(client):
+    assert client.post("/api/runs/no-such-run/stop").status_code == 404
+
+
+def test_stop_finished_run_reports_not_stopped(client, fake_pipeline):
+    run_id = client.post("/api/runs", json={"requirement": REQUIREMENT}).json()["run_id"]
+    _wait_for(client, run_id)
+    r = client.post(f"/api/runs/{run_id}/stop")
+    assert r.status_code == 200
+    assert r.json()["stopped"] is False
+
+
+def test_stop_running_run_cancels_it(client, monkeypatch):
+    from app.services import runs as runs_mod
+
+    monkeypatch.setattr(runs_mod, "run_team", _slow_cooperative_run_team)
+    run_id = client.post("/api/runs", json={"requirement": REQUIREMENT}).json()["run_id"]
+    _wait_for_status(client, run_id, "running")
+    r = client.post(f"/api/runs/{run_id}/stop")
+    assert r.status_code == 200
+    assert r.json()["stopped"] is True
+    assert _wait_for_status(client, run_id, "cancelled") == "cancelled"
+
+
+def test_delete_running_run_conflicts_then_stop_allows_delete(client, monkeypatch):
+    from app.services import runs as runs_mod
+
+    monkeypatch.setattr(runs_mod, "run_team", _slow_cooperative_run_team)
+    run_id = client.post("/api/runs", json={"requirement": REQUIREMENT}).json()["run_id"]
+    _wait_for_status(client, run_id, "running")
+    try:
+        r = client.delete(f"/api/runs/{run_id}")
+        assert r.status_code == 409, "deleting under a live worker must be refused"
+    finally:
+        client.post(f"/api/runs/{run_id}/stop")
+        _wait_for_status(client, run_id, "cancelled")
+    assert client.delete(f"/api/runs/{run_id}").status_code == 204

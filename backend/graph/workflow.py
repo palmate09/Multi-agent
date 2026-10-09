@@ -12,12 +12,15 @@ Terminal statuses:
   blocked             a generation or validation step failed; see GraphState.error
   domain_missed       the coverage gate found the code does not implement the
                       requested domain
+  cancelled           stopped by the user via the Stop control; partial
+                      artifacts remain on disk for inspection or resume
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -92,6 +95,7 @@ def test_app_importable():
 
 
 def _finish(out: Path, st, t0: float, emit) -> None:
+    llm.set_cancel(None)
     summary = {
         "status": st.status,
         "error": st.error or None,
@@ -121,11 +125,17 @@ def run_team(
     verbose: bool = False,
     on_event: Callable[[str, str, dict], None] | None = None,
     run_id: str | None = None,
+    cancel: threading.Event | None = None,
 ) -> object:
     """Execute the full pipeline, streaming progress through ``on_event``.
 
     Raises nothing for an expected failure: a generation that never succeeds
     ends the run with ``status="blocked"`` and a populated ``error``.
+
+    ``cancel`` is a cooperative stop signal (see ``RunStore.stop``): it is
+    honoured at node boundaries, so stopping latency is bounded by one agent
+    call or one sandbox run, never instant mid-call. A cancelled run ends with
+    ``status="cancelled"``.
     """
     from schemas.messages import GraphState
 
@@ -135,6 +145,10 @@ def run_team(
     # Scope LLM responses to this run so a later run with the same requirement
     # never inherits this run's completions from the shared backend cache.
     llm.set_run_scope(str(run_id or out.name))
+    # Arm the cooperative stop signal for this worker thread (None for
+    # ad-hoc/CLI runs). Cleared in _finish so the scope never leaks into the
+    # next run that reuses the thread.
+    llm.set_cancel(cancel)
 
     def emit(node: str, phase: str, payload: dict | None = None) -> None:
         data = payload or {}
@@ -146,6 +160,17 @@ def run_team(
 
     def log(msg: str) -> None:
         emit("pipeline", "progress", {"detail": msg})
+
+    def cancelled_now() -> bool:
+        return cancel is not None and cancel.is_set()
+
+    def finish_cancelled():
+        """Terminal state for a user stop: partial artifacts stay on disk."""
+        st.status = "cancelled"
+        st.error = "stopped by user"
+        emit("pipeline", "cancelled", {"detail": "stopped by user"})
+        _finish(out, st, t0, emit)
+        return st
 
     def block(reason: str, err: Exception | str) -> None:
         st.status = "blocked"
@@ -165,6 +190,8 @@ def run_team(
                 "clarifying_question": st.stories.clarifying_question,
             },
         )
+        if cancelled_now():
+            return finish_cancelled()
 
         emit("designer", "start")
         st.spec = Designer.stories_to_spec(st.stories, requirement=requirement)
@@ -192,6 +219,8 @@ def run_team(
                 "entrypoint": st.spec.entrypoint,
             },
         )
+        if cancelled_now():
+            return finish_cancelled()
 
         emit("developer", "start")
         st.code = Developer.spec_to_code(st.spec)
@@ -204,6 +233,8 @@ def run_team(
                 "entrypoint": f"{st.code.entry_module}.{st.code.entry_attr}",
             },
         )
+        if cancelled_now():
+            return finish_cancelled()
 
         # Static repair before anything expensive runs. Undefined names are the
         # most common generation error and ruff finds them in about a second,
@@ -213,6 +244,8 @@ def run_team(
             st.code = Developer.repair_lint(st.code, lint_out, kind=st.spec.kind)
             _write_code(out, st.code)
             emit("developer", "progress", {"detail": "lint repair pass complete"})
+        if cancelled_now():
+            return finish_cancelled()
 
         # Coverage gate, before any test is graded: a generation that ignored
         # the requested domain must not be able to report success.
@@ -231,6 +264,8 @@ def run_team(
             "done",
             {"ratio": verdict.ratio, "ok": verdict.ok, "missing": verdict.missing},
         )
+        if cancelled_now():
+            return finish_cancelled()
         if not verdict.ok:
             st.status = "domain_missed"
             st.error = (
@@ -247,6 +282,8 @@ def run_team(
         booted, boot_msg = Runner.boot_check(st.code, public_api=declared)
         _save(out, "boot.txt", boot_msg)
         emit("runner", "progress", {"detail": f"boot check: {'ok' if booted else 'FAILED'}"})
+        if cancelled_now():
+            return finish_cancelled()
 
         if not booted:
             # An import failure is fixable and carries an exact traceback, so it
@@ -254,6 +291,8 @@ def run_team(
             log("boot check failed; routing the traceback to the developer")
             no_ops = 0
             for _ in range(max_dev):
+                if cancelled_now():
+                    return finish_cancelled()
                 refl = (
                     "The application does not import. Fix the error below and reply with the "
                     "complete corrected files. Add any missing imports and make every FastAPI "
@@ -334,6 +373,8 @@ def run_team(
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(c)
             emit("tester", "done", {"files": sorted(st.tests.files)})
+        if cancelled_now():
+            return finish_cancelled()
     except GenerationError as exc:
         block("an agent could not produce a valid result", exc)
         return st
@@ -341,6 +382,8 @@ def run_team(
     # ---- test / fix loop ----
     attempt = 0
     while True:
+        if cancelled_now():
+            return finish_cancelled()
         emit("runner", "start", {"dev_try": st.retry_dev, "test_try": st.retry_test})
         st.report = Runner.run_tests(st.code, st.tests, use_docker=use_docker)
         _save(
@@ -358,6 +401,8 @@ def run_team(
                 "attempt": attempt,
             },
         )
+        if cancelled_now():
+            return finish_cancelled()
         if st.report.ok:
             st.status = "tests_green"
             break
@@ -436,6 +481,8 @@ def run_team(
         st.status = "accepted_no_review"
     elif st.status == "tests_green":
         for _ in range(max_review + 1):
+            if cancelled_now():
+                return finish_cancelled()
             ruff_out, bandit_out = Runner.static_analysis(st.code)
             _save(out, "ruff.txt", ruff_out)
             _save(out, "bandit.txt", bandit_out)

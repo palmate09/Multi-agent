@@ -30,6 +30,18 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$")
 MAX_EVENTS = 500
 
+#: Run statuses that still hold a worker thread or pool slot.
+ACTIVE_STATUSES = ("queued", "running", "stopping")
+
+
+class RunningError(RuntimeError):
+    """A lifecycle operation refused because the run is still active."""
+
+    def __init__(self, run_id: str, status: str):
+        super().__init__(f"run '{run_id}' is {status}; stop it first")
+        self.run_id = run_id
+        self.status = status
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -49,6 +61,10 @@ class Run:
         self.state: Any = None
         self._cond = threading.Condition()
         self._finished = False
+        # Cooperative stop: set by stop(), honoured by run_team at node
+        # boundaries. Never killed mid-call — threads cannot be safely killed.
+        self.cancel_event = threading.Event()
+        self.future: Any = None
 
     # -- event plumbing -------------------------------------------------
     def emit(self, node: str, phase: str, payload: dict[str, Any]) -> None:
@@ -254,10 +270,19 @@ class RunStore:
             return self._active
 
     def delete(self, run_id: str) -> bool:
+        """Remove a finished run. Refuses while the worker is alive.
+
+        Deleting under a running thread would orphan it: it keeps its pool
+        slot, keeps burning LLM quota, and recreates files in the deleted
+        directory. Callers must stop() first.
+        """
         with self._lock:
-            run = self._runs.pop(run_id, None)
-        if not run:
-            return False
+            run = self._runs.get(run_id)
+            if run is None:
+                return False
+            if run.status in ("queued", "running", "stopping"):
+                raise RunningError(run_id, run.status)
+            del self._runs[run_id]
         import shutil
 
         shutil.rmtree(run.run_dir, ignore_errors=True)
@@ -270,7 +295,38 @@ class RunStore:
     def submit(self, run: Run) -> None:
         with self._lock:
             self._active += 1
-        self._pool.submit(self._execute, run)
+        run.future = self._pool.submit(self._execute, run)
+
+    def stop(self, run_id: str) -> dict[str, Any] | None:
+        """Request cancellation. Idempotent; safe on finished runs.
+
+        Returns ``{"stopped": True}`` when a live run was signalled,
+        ``{"stopped": False, "status": ...}`` when there was nothing to stop,
+        and None when the run does not exist. A queued run that has not
+        started is unqueued outright so it never occupies a worker.
+        """
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                return None
+            if run.status not in ACTIVE_STATUSES:
+                return {"run_id": run_id, "stopped": False, "status": run.status}
+            run.status = "stopping"
+            run.updated_at = _now()
+            run.cancel_event.set()
+            future, finished = run.future, run._finished
+        if future is not None and not finished:
+            if future.cancel():
+                # Never started: release the slot submit() reserved, since
+                # _execute will never run its finally block.
+                with self._lock:
+                    self._active -= 1
+                run.status = "cancelled"
+                run.error = "stopped by user"
+                run.updated_at = _now()
+                run.emit("pipeline", "cancelled", {"detail": "stopped before start"})
+                run.mark_finished()
+        return {"run_id": run_id, "stopped": True, "status": run.status}
 
     def _execute(self, run: Run) -> None:
         run.status = "running"
@@ -285,6 +341,7 @@ class RunStore:
                 skip_reviewer=bool(run.options.get("skip_reviewer")),
                 on_event=run.emit,
                 run_id=run.run_id,
+                cancel=run.cancel_event,
             )
             run.status = run.state.status
         except Exception as exc:

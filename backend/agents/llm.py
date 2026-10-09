@@ -85,6 +85,20 @@ def set_run_scope(run_id: str) -> None:
     _RUN_SCOPE.set(run_id)
 
 
+# Cooperative stop signal for in-flight LLM backoff sleeps, set per run by
+# run_team() and read by _post_json_retry(). A plain ContextVar (like
+# _RUN_SCOPE) so no agent or backend signature changes: the event belongs to
+# the worker thread running the pipeline. While set, retry sleeps return
+# immediately instead of stalling a stop behind 4s/8s/16s backoffs; the
+# in-flight HTTP request itself is never aborted, and the next node boundary
+# in run_team ends the run. Default None keeps ad-hoc/CLI calls unchanged.
+_CANCEL_SCOPE: ContextVar = ContextVar("agent_team_cancel", default=None)
+
+
+def set_cancel(event) -> None:
+    _CANCEL_SCOPE.set(event)
+
+
 def clear_cache() -> None:
     CACHE.clear()
 
@@ -202,6 +216,21 @@ def _retry_max() -> int:
         return 3
 
 
+def _interruptible_sleep(delay: float) -> None:
+    """Backoff sleep that a run stop cuts short.
+
+    Reads the cancel scope (if run_team set one for this worker thread) and
+    waits on the event instead of sleeping blindly, so stopping a run that is
+    hammering a rate-limited provider returns in milliseconds, not after the
+    full 4s/8s/16s backoff chain.
+    """
+    ev = _CANCEL_SCOPE.get()
+    if ev is not None:
+        ev.wait(delay)
+    else:
+        time.sleep(delay)
+
+
 def _post_json_retry(
     url: str, payload: dict, headers: dict | None = None, timeout: int = 60
 ) -> dict:
@@ -223,7 +252,7 @@ def _post_json_retry(
             _note_failure(
                 f"retry:{url.split('/')[2]}", f"HTTP {e.code}, sleeping {delay:.0f}s {body}"
             )
-            time.sleep(delay)
+            _interruptible_sleep(delay)
         except (urllib.error.URLError, ConnectionError) as e:
             # Note: TimeoutError is deliberately NOT retried. With a 120s budget
             # per hosted call, three timeouts would turn one slow provider into a
@@ -235,7 +264,7 @@ def _post_json_retry(
             _note_failure(
                 f"retry:{url.split('/')[2]}", f"{type(e).__name__}, sleeping {delay:.0f}s"
             )
-            time.sleep(delay)
+            _interruptible_sleep(delay)
     if last:
         raise last
     raise RuntimeError("unreachable")
