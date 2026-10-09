@@ -23,25 +23,33 @@ if str(BACKEND) not in sys.path:
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip ``live_llm`` tests unless Ollama actually answers.
+    """Deselect ``live_llm`` tests unless Ollama actually answers.
 
     Without this, ``pytest -m live_llm`` on a machine with no models pulled
     hangs for the full timeout on every case instead of reporting a skip.
+
+    Deselection (not ``pytest.skip``) is the only safe action here: raising
+    Skipped inside a collection hook aborts the whole session with
+    INTERNALERROR on current pluggy/pytest instead of skipping anything.
     """
-    if not any(item.get_closest_marker("live_llm") for item in items):
+    live = [item for item in items if item.get_closest_marker("live_llm")]
+    if not live:
         return
     import urllib.error
     import urllib.request
 
+    models: set[str] = set()
     try:
         with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2) as r:
             import json
 
-            names = {m.get("name", "") for m in json.loads(r.read().decode()).get("models", [])}
+            models = {m.get("name", "") for m in json.loads(r.read().decode()).get("models", [])}
     except Exception:
-        pytest.skip("no Ollama on localhost:11434")
-    if not any(n.startswith("qwen2.5-coder") for n in names):
-        pytest.skip("no qwen2.5-coder model pulled")
+        models = set()
+    if any(n.startswith("qwen2.5-coder") for n in models):
+        return
+    items[:] = [item for item in items if item not in live]
+    config.hook.pytest_deselected(items=live)
 
 
 @pytest.fixture()
