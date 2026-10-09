@@ -94,7 +94,7 @@ paths:
 ```
 """
     monkeypatch.setattr(designer, "require", lambda *a, **k: (reply, {"ok": True}))
-    spec = designer.stories_to_spec(_stories(), requirement="a library that lends books")
+    spec = designer.stories_to_spec(_stories(), requirement="Build a REST API for a library that lends books")
     assert spec.entrypoint == "service.py"
     assert spec.files == ["service.py", "models.py"]
     assert "/loans" in spec.endpoints
@@ -103,7 +103,7 @@ paths:
 def test_designer_defaults_plan_when_model_omits_it(monkeypatch):
     reply = "```yaml\nopenapi: 3.1.0\ninfo: {title: L, version: 1.0.0}\npaths:\n  /loans:\n    post:\n      responses: {'201': {description: ok}}\n```"
     monkeypatch.setattr(designer, "require", lambda *a, **k: (reply, {"ok": True}))
-    spec = designer.stories_to_spec(_stories(), requirement="a library that lends books")
+    spec = designer.stories_to_spec(_stories(), requirement="Build a REST API for a library that lends books")
     assert spec.entrypoint.endswith(".py")
     assert spec.entrypoint in spec.files
 
@@ -117,7 +117,7 @@ def test_designer_raises_after_three_bad_attempts(monkeypatch):
 
     monkeypatch.setattr(designer, "require", always_bad)
     with pytest.raises(llm.GenerationError, match="valid OpenAPI"):
-        designer.stories_to_spec(_stories(), requirement="a library that lends books")
+        designer.stories_to_spec(_stories(), requirement="Build a REST API for a library that lends books")
     assert calls["n"] == 3
 
 
@@ -444,6 +444,287 @@ def test_tester_prompt_forbids_over_specified_error_bodies(monkeypatch):
     tester.spec_to_tests(
         ApiSpec(openapi_yaml="openapi: 3.1.0"), _stories(), entry_module="app", entry_attr="app"
     )
-    sop = tester.SOP
+    sop = tester._API_SOP
     assert "shape of an error body" in sop
     assert "status code" in sop
+
+
+def test_triage_routes_impossible_error_assertion_to_the_tester(monkeypatch):
+    """A test demanding 4xx for a request that legitimately returns 200.
+
+    Real signature from a deployed run: the suite did GET /appointments/ and
+    asserted 4xx, but a trailing-slash request on a collection is a valid list
+    request. No implementation can satisfy it.
+    """
+    monkeypatch.setattr(pm, "require", lambda *a, **k: ("code_bug", {"ok": True}))
+    from schemas.messages import TestFailure, TestReport
+
+    report = TestReport(
+        passed=9,
+        failed=1,
+        failures=[
+            TestFailure(
+                name="test_get_appointment_by_id_boundary_empty_string",
+                error=(
+                    "assert 400 <= resp.status_code < 500\n"
+                    "E  assert 400 <= 200\n"
+                    "E   + where 200 = <Response [200 OK]>.status_code"
+                ),
+            )
+        ],
+    )
+    assert pm.triage(report) == "test_bug"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "sqlalchemy.exc.OperationalError: no such table: appointments",
+        "ModuleNotFoundError: No module named 'models'",
+        "AssertionError: assert 404 == 200",
+        "AssertionError: assert 201 == 200",
+        "AttributeError: 'NoneType' object has no attribute 'id'",
+    ],
+)
+def test_triage_never_misroutes_real_code_bugs(monkeypatch, error):
+    """The deterministic signatures must not swallow genuine code bugs."""
+    monkeypatch.setattr(pm, "require", lambda *a, **k: ("code_bug", {"ok": True}))
+    from schemas.messages import TestFailure, TestReport
+
+    report = TestReport(passed=9, failed=1, failures=[TestFailure(name="t", error=error)])
+    assert pm.triage(report) == "code_bug", error
+
+
+PICKLE_SESSION_RAW = (
+    "copy.py:162: in deepcopy y = _reconstruct(x, memo, *rv) "
+    "sqlalchemy.orm.session.Session object identity_map "
+    "x = <module 'sqlite3.dbapi2'> "
+    "TypeError: cannot pickle 'module' object"
+)
+
+
+def test_triage_routes_unpicklable_session_to_the_developer(monkeypatch):
+    """All 9 tests dying in deepcopy of a Session is a code bug, full stop.
+
+    Real signature from run-20261009-131219: every handler took
+    ``db=SessionLocal()`` as a default, FastAPI deepcopied the session while
+    building each route, and nothing could pass. The LLM triage misrouted this
+    to the Tester twice, so the deterministic rule must overrule the model.
+    """
+    monkeypatch.setattr(pm, "require", lambda *a, **k: ("test_bug", {"ok": True}))
+    from schemas.messages import TestFailure, TestReport
+
+    report = TestReport(
+        passed=0,
+        failed=9,
+        failures=[
+            TestFailure(name="t", error="TypeError: cannot pickle 'module' object")
+        ],
+        raw=PICKLE_SESSION_RAW,
+    )
+    assert pm.triage(report) == "code_bug"
+
+
+def test_reflect_diagnoses_session_default_argument_without_llm():
+    """The reflection must name the SessionLocal() default-arg cause directly.
+
+    The truncated one-liner ("TypeError: cannot pickl...") hides it, so the
+    diagnosis reads the runner output, not the model.
+    """
+    from schemas.messages import TestFailure, TestReport
+
+    report = TestReport(
+        passed=0,
+        failed=9,
+        failures=[
+            TestFailure(name="t", error="TypeError: cannot pickle 'module' object")
+        ],
+        raw=PICKLE_SESSION_RAW,
+    )
+    text = developer.reflect(report)
+    assert "SessionLocal()" in text
+    assert "Depends(get_db)" in text
+
+
+def test_reviewer_blocks_session_as_handler_default():
+    """``db=SessionLocal()`` on a route handler must fail review as a blocker."""
+    from agents import reviewer
+    from schemas.messages import CodeBundle, TestReport, TestSuite
+
+    code = CodeBundle(
+        files={
+            "main.py": (
+                "from fastapi import FastAPI\n"
+                "app = FastAPI()\n"
+                "@app.get('/x')\n"
+                "def read_x(db=SessionLocal()):\n"
+                "    return []\n"
+            )
+        },
+        entry_module="main",
+        entry_attr="app",
+    )
+    spec = ApiSpec(openapi_yaml="x", entrypoint="main.py", files=["main.py"])
+    comments = reviewer._api_checks(
+        code, spec, TestSuite(files={}), TestReport(passed=0, failed=0)
+    )
+    blockers = [c for c in comments if c.severity == "blocker"]
+    assert any("Depends(get_db)" in c.message for c in blockers)
+
+
+def test_reviewer_allows_depends_injected_session():
+    """``db: Session = Depends(get_db)`` must not trip the session check."""
+    from agents import reviewer
+    from schemas.messages import CodeBundle, TestReport, TestSuite
+
+    code = CodeBundle(
+        files={
+            "main.py": (
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "@app.get('/x')\n"
+                "def read_x(db=Depends(get_db)):\n"
+                "    return []\n"
+            )
+        },
+        entry_module="main",
+        entry_attr="app",
+    )
+    spec = ApiSpec(openapi_yaml="x", entrypoint="main.py", files=["main.py"])
+    comments = reviewer._api_checks(
+        code, spec, TestSuite(files={}), TestReport(passed=0, failed=0)
+    )
+    assert not [c for c in comments if "default argument" in c.message]
+
+
+def test_tester_prompt_forbids_impossible_error_assertions():
+    assert "must be satisfiable" in tester._API_SOP
+    assert "valid list request and returns" in tester._API_SOP
+
+
+def test_cloud_order_supports_provider_chains(monkeypatch):
+    """LLM_PROVIDER=groq,gemini tries Groq first, Gemini only on decline."""
+    monkeypatch.setenv("LLM_PROVIDER", "groq,gemini")
+    assert [name for _, name in llm.cloud_order()] == ["groq/free", "gemini"]
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    assert [name for _, name in llm.cloud_order()] == ["groq/free"]
+    monkeypatch.setenv("LLM_PROVIDER", "bogus,gemini")
+    assert [name for _, name in llm.cloud_order()] == ["gemini"]
+    monkeypatch.setenv("LLM_PROVIDER", "bogus")
+    assert len(llm.cloud_order()) > 2, "unknown name falls back to auto"
+
+
+# --------------------------------------------------------------- reasoner ---
+PLAN_REPLY = """Working it through first:
+```json
+{"approach": "Model each loan as a row keyed by ISBN, with a unique index.",
+ "decisions": ["SQLite through SQLAlchemy", "404 for an unknown ISBN"],
+ "risks": ["borrowing twice for the same ISBN"],
+ "edge_cases": ["blank ISBN"],
+ "open_questions": ["is a due date required?"]}
+```
+"""
+
+
+def _reasoner(monkeypatch, reply=PLAN_REPLY, calls=None):
+    from agents import reasoner
+
+    def fake(prompt, system, role=None, **kw):
+        if calls is not None:
+            calls.append({"role": role, "prompt": prompt})
+        return reply, {"ok": True}
+
+    monkeypatch.setattr(reasoner, "require", fake)
+    return reasoner
+
+
+def test_reasoner_parses_the_block_under_its_own_role(monkeypatch):
+    calls = []
+    reasoner = _reasoner(monkeypatch, calls=calls)
+    p = reasoner.plan("Build a REST API for a library that lends books", stories=_stories())
+    assert p.structured is True
+    assert p.approach.startswith("Model each loan")
+    assert p.decisions == ["SQLite through SQLAlchemy", "404 for an unknown ISBN"]
+    assert p.risks == ["borrowing twice for the same ISBN"]
+    assert p.edge_cases == ["blank ISBN"]
+    assert p.open_questions == ["is a due date required?"]
+    assert calls[0]["role"] == "reasoner"
+    assert "US1" in calls[0]["prompt"], "the plan is made with the stories in view"
+
+
+def test_reasoner_keeps_prose_when_the_block_never_parses(monkeypatch):
+    """The node is advisory: three prose replies must not fail the run."""
+    calls = []
+    reply = "I would key the schema on ISBN and index it, then return 404."
+    reasoner = _reasoner(monkeypatch, reply=reply, calls=calls)
+    p = reasoner.plan("Build a REST API for a library")
+    assert p.structured is False
+    assert "ISBN" in p.approach
+    assert len(calls) == 3, "the structured attempt is retried before degrading"
+
+
+def test_reasoner_still_blocks_when_nothing_can_be_generated(monkeypatch):
+    """No template: a backend that never answers raises like every other node."""
+    from agents import reasoner
+
+    def boom(*a, **k):
+        raise llm.GenerationError("stubbed: no backend available")
+
+    monkeypatch.setattr(reasoner, "require", boom)
+    with pytest.raises(llm.GenerationError):
+        reasoner.plan("Build a REST API for a library")
+
+
+def test_plan_block_is_labelled_advisory_and_covers_every_section():
+    from agents import reasoner
+    from schemas.messages import Plan
+
+    text = reasoner.plan_block(
+        Plan(approach="key on ISBN", decisions=["d1"], risks=["r1"], edge_cases=["e1"])
+    )
+    assert "advisory" in text
+    for expected in ("key on ISBN", "Decisions", "- d1", "Risks", "- r1", "Edge cases", "- e1"):
+        assert expected in text, expected
+
+    assert reasoner.plan_block(None) == ""
+    assert reasoner.plan_block(Plan()) == "", "an empty plan must not pad the prompt"
+
+
+def test_designer_is_told_the_plan_but_not_bound_by_it(monkeypatch):
+    from schemas.messages import Plan
+
+    seen = {}
+    reply = "```yaml\nopenapi: 3.1.0\ninfo: {title: L, version: 1.0.0}\npaths:\n  /loans:\n    post:\n      responses: {'201': {description: ok}}\n```"
+
+    def fake(prompt, system, role=None, **kw):
+        seen["prompt"] = prompt
+        return reply, {"ok": True}
+
+    monkeypatch.setattr(designer, "require", fake)
+    designer.stories_to_spec(
+        _stories(),
+        requirement="Build a REST API for a library that lends books",
+        plan=Plan(approach="key the schema on ISBN"),
+    )
+    assert "key the schema on ISBN" in seen["prompt"]
+    assert "advisory" in seen["prompt"]
+
+
+def test_developer_is_told_the_plan(monkeypatch):
+    from schemas.messages import Plan
+
+    seen = {}
+
+    def fake(prompt, system, role=None, **kw):
+        seen["prompt"] = prompt
+        return APP_REPLY, {"ok": True}
+
+    monkeypatch.setattr(developer, "require", fake)
+    spec = ApiSpec(openapi_yaml="openapi: 3.1.0", entrypoint="app.py", files=["app.py"])
+    developer.spec_to_code(spec, plan=Plan(approach="keep the ISBN index unique"))
+    assert "keep the ISBN index unique" in seen["prompt"]
+
+    # Without a plan the prompt is unchanged in substance: no empty section.
+    seen.clear()
+    developer.spec_to_code(spec)
+    assert "advisory" not in seen["prompt"]

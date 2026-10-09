@@ -1,4 +1,4 @@
-"""Run lifecycle endpoints: create, list, inspect, stream, delete, artifacts."""
+"""Run lifecycle endpoints: create, list, inspect, stream, stop, delete, artifacts."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from fastapi.responses import Response, StreamingResponse
 from app.config import Settings, get_settings
 from app.dependencies import get_store
 from app.schemas import RunCreate, RunDetail, RunSummary
-from app.services.runs import Run, RunStore
+from app.services.runs import Run, RunningError, RunStore
 
 log = logging.getLogger("app.api.runs")
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -48,6 +48,7 @@ def create_run(
         run_id=payload.run_id,
         skip_tester=payload.skip_tester,
         skip_reviewer=payload.skip_reviewer,
+        skip_reasoner=payload.skip_reasoner,
         use_docker=payload.use_docker,
     )
     store.submit(run)
@@ -136,6 +137,59 @@ def get_artifact(run_id: str, path: str, store: RunStore = Depends(get_store)) -
 
 @router.delete("/{run_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 def delete_run(run_id: str, store: RunStore = Depends(get_store)):
-    if not store.delete(run_id):
+    try:
+        deleted = store.delete(run_id)
+    except RunningError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{run_id}/stop")
+def stop_run(run_id: str, store: RunStore = Depends(get_store)) -> dict:
+    """Request cancellation of a queued or running pipeline.
+
+    Cooperative: the worker honours the signal at the next node boundary and
+    the run settles at ``cancelled``. Already-terminal runs answer
+    ``stopped: False`` with their current status (idempotent).
+    """
+    result = store.stop(run_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    return result
+
+
+@router.post("/{run_id}/restart", response_model=RunSummary, status_code=status.HTTP_202_ACCEPTED)
+def restart_run(run_id: str, store: RunStore = Depends(get_store)) -> RunSummary:
+    """Stop if active, delete all of the run's data, and start over.
+
+    The old run id disappears; the fresh run carries the same requirement
+    and options under a new id. Returns 409 when a live worker does not
+    exit in time — nothing is deleted in that case.
+    """
+    try:
+        new_run = store.restart(run_id)
+    except RunningError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if new_run is None:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    return RunSummary(**new_run.summary)
+
+
+@router.post("/{run_id}/resume", response_model=RunSummary, status_code=status.HTTP_202_ACCEPTED)
+def resume_run(run_id: str, store: RunStore = Depends(get_store)) -> RunSummary:
+    """Continue a settled run from its saved artifacts under a fresh id.
+
+    Nothing is deleted: the old run stays as history and the new run links
+    it via ``resumed_from``. Phases with artifacts are skipped with fresh
+    retry budgets. Returns 409 for active runs (stop first) and for
+    accepted runs (nothing to resume).
+    """
+    try:
+        new_run = store.resume(run_id)
+    except RunningError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if new_run is None:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    return RunSummary(**new_run.summary)

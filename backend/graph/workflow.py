@@ -1,4 +1,4 @@
-"""Orchestration: pm -> designer -> developer -> tester -> runner -> triage -> reviewer.
+"""Orchestration: pm -> reasoner -> designer -> developer -> tester -> runner -> triage -> reviewer.
 
 Sequential by design: the Tester's independence comes from never seeing the
 code, not from running at the same time, and the small local models gain
@@ -12,12 +12,15 @@ Terminal statuses:
   blocked             a generation or validation step failed; see GraphState.error
   domain_missed       the coverage gate found the code does not implement the
                       requested domain
+  cancelled           stopped by the user via the Stop control; partial
+                      artifacts remain on disk for inspection or resume
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -26,15 +29,36 @@ from agents import designer as Designer
 from agents import developer as Developer
 from agents import llm
 from agents import pm as PM
+from agents import reasoner as Reasoner
 from agents import reviewer as Reviewer
 from agents import tester as Tester
 from agents.coverage import check as coverage_check
-from agents.introspect import all_routes, spec_paths
+from agents.introspect import all_routes, find_app_object, spec_paths
 from agents.llm import GenerationError
 from sandbox import runner as Runner
-from schemas.messages import CoverageReport, TestFailure, TestReport, TestSuite
+from schemas.messages import (
+    ApiSpec,
+    CodeBundle,
+    CoverageReport,
+    GraphState,
+    Plan,
+    TestFailure,
+    TestReport,
+    TestSuite,
+    UserStories,
+)
 
-NODES = ("pm", "designer", "developer", "tester", "runner", "triage", "reviewer", "final")
+NODES = (
+    "pm",
+    "reasoner",
+    "designer",
+    "developer",
+    "tester",
+    "runner",
+    "triage",
+    "reviewer",
+    "final",
+)
 
 DEFAULT_MAX_DEV = 4
 
@@ -51,13 +75,124 @@ def _write_code(out: Path, code) -> None:
         p.write_text(content)
 
 
+def reconstruct_state(run_dir: str | Path) -> GraphState:
+    """Rebuild pipeline state from a previous run's saved artifacts.
+
+    Every artifact is optional: a cancelled run may have stopped anywhere, so
+    a missing file simply leaves that phase (and everything after it) to be
+    re-executed. Never raises on malformed files — they are treated as absent.
+    Always returns a state, possibly empty (resume then behaves as restart).
+    """
+    root = Path(run_dir)
+    st = GraphState()
+
+    def _json(name: str):
+        try:
+            return json.loads((root / name).read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    stories = _json("stories.json")
+    if isinstance(stories, dict):
+        with contextlib.suppress(Exception):
+            st.stories = UserStories.model_validate(stories)
+
+    reasoning = _json("reasoning.json")
+    if isinstance(reasoning, dict):
+        with contextlib.suppress(Exception):
+            st.plan = Plan.model_validate(reasoning)
+
+    spec_text = None
+    try:
+        spec_text = (root / "spec.yaml").read_text()
+    except OSError:
+        spec_text = None
+    plan_meta = _json("plan.json") or {}
+    if spec_text:
+        with contextlib.suppress(Exception):
+            st.spec = ApiSpec(
+                openapi_yaml=spec_text,
+                kind=plan_meta.get("kind", "api"),
+                entrypoint=plan_meta.get("entrypoint", "main.py"),
+                files=plan_meta.get("files", []),
+                public_api=plan_meta.get("public_api", []),
+                contract_text=plan_meta.get("contract_text", ""),
+            )
+
+    code_files: dict[str, str] = {}
+    code_root = root / "code"
+    if code_root.is_dir():
+        for p in sorted(code_root.rglob("*")):
+            if p.is_file():
+                try:
+                    code_files[str(p.relative_to(code_root))] = p.read_text()
+                except OSError:
+                    continue
+    if code_files:
+        module = (plan_meta.get("entrypoint", "main.py") or "main.py").replace(".py", "")
+        entry_module, entry_attr = module, ""
+        try:
+            found = find_app_object(code_files)
+        except Exception:
+            found = None
+        if found:
+            entry_module, entry_attr = found
+        elif (st.spec.kind if st.spec else "api") == "api":
+            entry_attr = "app"
+        with contextlib.suppress(Exception):
+            st.code = CodeBundle(files=code_files, entry_module=entry_module, entry_attr=entry_attr)
+
+    test_files: dict[str, str] = {}
+    tests_root = root / "tests"
+    if tests_root.is_dir():
+        for p in sorted(tests_root.rglob("*")):
+            if p.is_file() and p.suffix == ".py":
+                try:
+                    test_files[str(p.relative_to(tests_root))] = p.read_text()
+                except OSError:
+                    continue
+    if test_files:
+        st.tests = TestSuite(files=test_files)
+
+    reports = sorted(root.glob("report_try*.json"))
+    if reports:
+        with contextlib.suppress(Exception):
+            st.report = TestReport.model_validate(json.loads(reports[-1].read_text()))
+
+    coverage = _json("coverage.json")
+    if isinstance(coverage, dict):
+        with contextlib.suppress(Exception):
+            st.coverage = CoverageReport.model_validate(coverage)
+
+    memory = _json("reflections.json")
+    if isinstance(memory, list):
+        st.memory = [str(m) for m in memory]
+
+    return st
+
+
 def _self_checks(spec) -> str:
     """A smoke test used only when the Tester is ablated.
 
-    Verifies the app is importable and that every route the spec declares is
-    actually registered. Deliberately minimal: with the Tester ablated there is
-    no independent check of behaviour, which is what the ablation demonstrates.
+    Deliberately minimal: with the Tester ablated there is no independent check
+    of behaviour, which is exactly what the ablation demonstrates. For an API
+    it checks the routes are registered; for a program it checks the declared
+    interface resolves.
     """
+    if getattr(spec, "kind", "api") == "program":
+        names = ", ".join(repr(n) for n in spec.public_api)
+        module = spec.entrypoint[:-3] if spec.entrypoint.endswith(".py") else spec.entrypoint
+        return f'''"""Ablated run: developer-authored smoke checks only."""
+import {module}
+
+
+def test_declared_interface_present():
+    for name in [{names}]:
+        target = {module}
+        for part in name.split('.'):
+            assert hasattr(target, part), f"missing {{name}}"
+            target = getattr(target, part)
+'''
     pairs, _paths = spec_paths(spec.openapi_yaml)
     paths = sorted({p for p, _ in pairs} - {"/health"})
     checks = "\n".join(
@@ -77,6 +212,7 @@ def test_app_importable():
 
 
 def _finish(out: Path, st, t0: float, emit) -> None:
+    llm.set_cancel(None)
     summary = {
         "status": st.status,
         "error": st.error or None,
@@ -103,23 +239,52 @@ def run_team(
     use_docker: bool = False,
     skip_tester: bool = False,
     skip_reviewer: bool = False,
+    skip_reasoner: bool = False,
     verbose: bool = False,
     on_event: Callable[[str, str, dict], None] | None = None,
     run_id: str | None = None,
+    cancel: threading.Event | None = None,
+    resume: GraphState | None = None,
 ) -> object:
     """Execute the full pipeline, streaming progress through ``on_event``.
 
     Raises nothing for an expected failure: a generation that never succeeds
     ends the run with ``status="blocked"`` and a populated ``error``.
-    """
-    from schemas.messages import GraphState
 
+    ``cancel`` is a cooperative stop signal (see ``RunStore.stop``): it is
+    honoured at node boundaries, so stopping latency is bounded by one agent
+    call or one sandbox run, never instant mid-call. A cancelled run ends with
+    ``status="cancelled"``.
+
+    ``resume`` continues a previous run from its saved artifacts (see
+    ``reconstruct_state``): phases with artifacts are skipped, the coverage
+    gate and boot check always re-run, retry budgets start fresh.
+    """
     out = Path(out_dir)
     t0 = time.time()
     st = GraphState(requirement=requirement, run_id=run_id or out.name)
+    if resume is not None:
+        # Adopt the reconstructed state under the new run's identity. Budgets
+        # restart: the resumed run gets full dev/test/review retries, since it
+        # may be continuing from a budget the old run exhausted.
+        st = resume
+        st.run_id = run_id or out.name
+        st.status = "pending"
+        st.error = ""
+        st.retry_dev = 0
+        st.retry_test = 0
+        st.retry_review = 0
+        if skip_reasoner:
+            # Ablation wins over restored artifacts: a resumed ablated run
+            # must behave like a fresh ablated run (designer gets no plan).
+            st.plan = None
     # Scope LLM responses to this run so a later run with the same requirement
     # never inherits this run's completions from the shared backend cache.
     llm.set_run_scope(str(run_id or out.name))
+    # Arm the cooperative stop signal for this worker thread (None for
+    # ad-hoc/CLI runs). Cleared in _finish so the scope never leaks into the
+    # next run that reuses the thread.
+    llm.set_cancel(cancel)
 
     def emit(node: str, phase: str, payload: dict | None = None) -> None:
         data = payload or {}
@@ -132,6 +297,17 @@ def run_team(
     def log(msg: str) -> None:
         emit("pipeline", "progress", {"detail": msg})
 
+    def cancelled_now() -> bool:
+        return cancel is not None and cancel.is_set()
+
+    def finish_cancelled():
+        """Terminal state for a user stop: partial artifacts stay on disk."""
+        st.status = "cancelled"
+        st.error = "stopped by user"
+        emit("pipeline", "cancelled", {"detail": "stopped by user"})
+        _finish(out, st, t0, emit)
+        return st
+
     def block(reason: str, err: Exception | str) -> None:
         st.status = "blocked"
         st.error = f"{reason}: {err}"
@@ -139,60 +315,129 @@ def run_team(
         _finish(out, st, t0, emit)
 
     try:
-        emit("pm", "start", {"requirement": requirement})
-        st.stories = PM.requirement_to_stories(requirement)
-        _save(out, "stories.json", st.stories.model_dump_json(indent=2))
-        emit(
-            "pm",
-            "done",
-            {
-                "stories": len(st.stories.stories),
-                "clarifying_question": st.stories.clarifying_question,
-            },
-        )
+        if resume is not None:
+            skipped = sorted(
+                name
+                for name, present in (
+                    ("pm", st.stories is not None),
+                    ("reasoner", st.plan is not None),
+                    ("designer", st.spec is not None),
+                    ("developer", st.code is not None),
+                    ("tester", st.tests is not None),
+                )
+                if present
+            )
+            emit(
+                "pipeline",
+                "resumed",
+                {"detail": f"resuming with {len(skipped)} phases skipped", "skipped": skipped},
+            )
+        if st.stories is None:
+            emit("pm", "start", {"requirement": requirement})
+            st.stories = PM.requirement_to_stories(requirement)
+            _save(out, "stories.json", st.stories.model_dump_json(indent=2))
+            emit(
+                "pm",
+                "done",
+                {
+                    "stories": len(st.stories.stories),
+                    "clarifying_question": st.stories.clarifying_question,
+                },
+            )
+        if cancelled_now():
+            return finish_cancelled()
 
-        emit("designer", "start")
-        st.spec = Designer.stories_to_spec(st.stories, requirement=requirement)
-        _save(out, "spec.yaml", st.spec.openapi_yaml)
-        _save(
-            out,
-            "plan.json",
-            json.dumps({"entrypoint": st.spec.entrypoint, "files": st.spec.files}, indent=2),
-        )
-        emit(
-            "designer",
-            "done",
-            {
-                "endpoints": len(st.spec.endpoints),
-                "files": st.spec.files,
-                "entrypoint": st.spec.entrypoint,
-            },
-        )
+        # Plan-then-act: the Reasoner works the requirement out before a spec
+        # exists, so a misread costs one advisory node instead of a contract, a
+        # codebase and a test suite. Ablating it (skip_reasoner) restores the
+        # old straight-to-design behaviour for comparison. A resumed run with a
+        # restored plan skips straight to design.
+        if st.plan is None:
+            emit("reasoner", "start")
+            if skip_reasoner:
+                log("reasoner ablated: the designer gets no plan")
+                emit("reasoner", "done", {"ablated": True})
+            else:
+                st.plan = Reasoner.plan(requirement, stories=st.stories)
+                _save(out, "reasoning.json", st.plan.model_dump_json(indent=2))
+                emit(
+                    "reasoner",
+                    "done",
+                    {
+                        "approach": (st.plan.approach or "")[:240],
+                        "risks": len(st.plan.risks),
+                        "edge_cases": len(st.plan.edge_cases),
+                        "open_questions": len(st.plan.open_questions),
+                        "structured": st.plan.structured,
+                    },
+                )
+        if cancelled_now():
+            return finish_cancelled()
 
-        emit("developer", "start")
-        st.code = Developer.spec_to_code(st.spec)
-        _write_code(out, st.code)
-        emit(
-            "developer",
-            "done",
-            {
-                "files": sorted(st.code.files),
-                "entrypoint": f"{st.code.entry_module}.{st.code.entry_attr}",
-            },
-        )
+        if st.spec is None:
+            emit("designer", "start")
+            st.spec = Designer.stories_to_spec(
+                st.stories, requirement=requirement, plan=st.plan
+            )
+            _save(out, "spec.yaml", st.spec.openapi_yaml)
+            _save(
+                out,
+                "plan.json",
+                json.dumps(
+                    {
+                        "kind": st.spec.kind,
+                        "entrypoint": st.spec.entrypoint,
+                        "files": st.spec.files,
+                        "public_api": st.spec.public_api,
+                        "contract_text": st.spec.contract_text,
+                    },
+                    indent=2,
+                ),
+            )
+            emit(
+                "designer",
+                "done",
+                {
+                    "endpoints": len(st.spec.endpoints),
+                    "files": st.spec.files,
+                    "entrypoint": st.spec.entrypoint,
+                },
+            )
+        if cancelled_now():
+            return finish_cancelled()
+
+        if st.code is None:
+            emit("developer", "start")
+            st.code = Developer.spec_to_code(st.spec, plan=st.plan)
+            _write_code(out, st.code)
+            emit(
+                "developer",
+                "done",
+                {
+                    "files": sorted(st.code.files),
+                    "entrypoint": f"{st.code.entry_module}.{st.code.entry_attr}",
+                },
+            )
+        if cancelled_now():
+            return finish_cancelled()
 
         # Static repair before anything expensive runs. Undefined names are the
         # most common generation error and ruff finds them in about a second,
         # where a failing pytest cycle costs a whole generation plus a run.
         lint_out, _ = Runner.static_analysis(st.code)
         if lint_out:
-            st.code = Developer.repair_lint(st.code, lint_out)
+            st.code = Developer.repair_lint(st.code, lint_out, kind=st.spec.kind)
             _write_code(out, st.code)
             emit("developer", "progress", {"detail": "lint repair pass complete"})
+        if cancelled_now():
+            return finish_cancelled()
 
         # Coverage gate, before any test is graded: a generation that ignored
         # the requested domain must not be able to report success.
-        verdict = coverage_check(requirement, st.code.files, all_routes(st.code.files))
+        # Only an HTTP service contributes route paths to the domain check; a
+        # program's vocabulary lives in its modules and symbols.
+        routes = all_routes(st.code.files) if st.spec.kind == "api" else set()
+        verdict = coverage_check(requirement, st.code.files, routes)
         st.coverage = CoverageReport(
             covered=verdict.covered,
             missing=verdict.missing,
@@ -204,6 +449,8 @@ def run_team(
             "done",
             {"ratio": verdict.ratio, "ok": verdict.ok, "missing": verdict.missing},
         )
+        if cancelled_now():
+            return finish_cancelled()
         if not verdict.ok:
             st.status = "domain_missed"
             st.error = (
@@ -214,10 +461,14 @@ def run_team(
             _finish(out, st, t0, emit)
             return st
 
-        # Boot check: the app must import before tests are worth running.
-        booted, boot_msg = Runner.boot_check(st.code)
+        # Boot check: the code must import, and expose what the contract declares.
+        # A program declares a public interface rather than an ASGI app object.
+        declared = st.spec.public_api if st.spec.kind == "program" else None
+        booted, boot_msg = Runner.boot_check(st.code, public_api=declared)
         _save(out, "boot.txt", boot_msg)
         emit("runner", "progress", {"detail": f"boot check: {'ok' if booted else 'FAILED'}"})
+        if cancelled_now():
+            return finish_cancelled()
 
         if not booted:
             # An import failure is fixable and carries an exact traceback, so it
@@ -225,6 +476,8 @@ def run_team(
             log("boot check failed; routing the traceback to the developer")
             no_ops = 0
             for _ in range(max_dev):
+                if cancelled_now():
+                    return finish_cancelled()
                 refl = (
                     "The application does not import. Fix the error below and reply with the "
                     "complete corrected files. Add any missing imports and make every FastAPI "
@@ -243,6 +496,7 @@ def run_team(
                             raw=boot_msg[-2000:],
                         ),
                         refl,
+                        kind=st.spec.kind,
                     )
                 except GenerationError as exc:
                     log(f"boot repair failed: {exc}")
@@ -258,7 +512,7 @@ def run_team(
                 st.retry_dev += 1
                 _write_code(out, st.code)
                 emit("developer", "start", {"reason": "boot_failure", "retry": st.retry_dev})
-                booted, boot_msg = Runner.boot_check(st.code)
+                booted, boot_msg = Runner.boot_check(st.code, public_api=declared)
                 _save(out, "boot.txt", boot_msg)
                 emit(
                     "runner", "progress", {"detail": f"boot check: {'ok' if booted else 'FAILED'}"}
@@ -268,7 +522,7 @@ def run_team(
                 st.retry_dev += 1
                 _write_code(out, st.code)
                 emit("developer", "start", {"reason": "boot_failure", "retry": st.retry_dev})
-                booted, boot_msg = Runner.boot_check(st.code)
+                booted, boot_msg = Runner.boot_check(st.code, public_api=declared)
                 _save(out, "boot.txt", boot_msg)
                 emit(
                     "runner", "progress", {"detail": f"boot check: {'ok' if booted else 'FAILED'}"}
@@ -290,19 +544,22 @@ def run_team(
             log("tester ablated: developer-authored checks only")
             st.tests = TestSuite(files={"test_generated.py": _self_checks(st.spec)})
             emit("tester", "done", {"ablated": True, "files": ["test_generated.py"]})
-        else:
+        elif st.tests is None:
             emit("tester", "start")
             st.tests = Tester.spec_to_tests(
                 st.spec,
                 st.stories,
                 entry_module=st.code.entry_module,
                 entry_attr=st.code.entry_attr,
+                code=st.code,
             )
             for rel, c in st.tests.files.items():
                 p = out / "tests" / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(c)
             emit("tester", "done", {"files": sorted(st.tests.files)})
+        if cancelled_now():
+            return finish_cancelled()
     except GenerationError as exc:
         block("an agent could not produce a valid result", exc)
         return st
@@ -310,6 +567,8 @@ def run_team(
     # ---- test / fix loop ----
     attempt = 0
     while True:
+        if cancelled_now():
+            return finish_cancelled()
         emit("runner", "start", {"dev_try": st.retry_dev, "test_try": st.retry_test})
         st.report = Runner.run_tests(st.code, st.tests, use_docker=use_docker)
         _save(
@@ -327,12 +586,14 @@ def run_team(
                 "attempt": attempt,
             },
         )
+        if cancelled_now():
+            return finish_cancelled()
         if st.report.ok:
             st.status = "tests_green"
             break
 
         verdict_txt = PM.triage(st.report)
-        refl = Developer.reflect(st.report)
+        refl = Developer.reflect(st.report, kind=st.spec.kind)
         st.memory.append(refl)
         _save(out, "reflections.json", json.dumps(st.memory, indent=2))
         emit(
@@ -356,6 +617,7 @@ def run_team(
                     st.stories,
                     entry_module=st.code.entry_module,
                     entry_attr=st.code.entry_attr,
+                    code=st.code,
                 )
             except GenerationError as exc:
                 log(f"tester regeneration failed: {exc}")
@@ -367,9 +629,15 @@ def run_team(
             st.error = f"tests still failing after {st.retry_dev} developer retries"
             break
         try:
-            st.code = Developer.patch_code(st.code, st.report, refl)
+            st.code = Developer.patch_code(st.code, st.report, refl, tests=st.tests, kind=st.spec.kind)
         except GenerationError as exc:
-            log(f"developer patch failed: {exc}")
+            # The model was never reached (rate limit, outage): the bundle is
+            # unchanged but NOT because the model tried and gave up. Say so —
+            # "produced no change" would blame the model and hide the outage.
+            st.status = "unresolved"
+            st.error = f"developer patch LLM call failed ({exc}); re-running later may succeed"
+            emit("developer", "done", {"changed": False, "retry": st.retry_dev, "llm_error": True})
+            break
         if st.code.files == before:
             # An unchanged bundle means every further attempt repeats this one.
             st.status = "unresolved"
@@ -379,9 +647,16 @@ def run_team(
         st.retry_dev += 1
         _write_code(out, st.code)
         emit("developer", "start", {"reason": verdict_txt, "retry": st.retry_dev})
-        # Re-verify the entrypoint still resolves after a patch.
-        found = st.code.entry_module
-        if not found:
+        # Re-verify the entrypoint still resolves after a patch. A program has
+        # no ASGI app object; its entrypoint is the declared module.
+        if st.spec.kind == "program":
+            if not st.code.entry_module or not any(
+                f == st.spec.entrypoint for f in st.code.files
+            ):
+                st.status = "unresolved"
+                st.error = "patched code no longer contains the declared entrypoint"
+                break
+        elif not st.code.entry_module:
             st.status = "unresolved"
             st.error = "patched code no longer exposes an importable app object"
             break
@@ -391,6 +666,8 @@ def run_team(
         st.status = "accepted_no_review"
     elif st.status == "tests_green":
         for _ in range(max_review + 1):
+            if cancelled_now():
+                return finish_cancelled()
             ruff_out, bandit_out = Runner.static_analysis(st.code)
             _save(out, "ruff.txt", ruff_out)
             _save(out, "bandit.txt", bandit_out)
@@ -426,9 +703,13 @@ def run_team(
                         raw="; ".join(c.message for c in st.review.blockers),
                     ),
                     "Review blockers to fix: " + "; ".join(c.message for c in st.review.blockers),
+                    tests=st.tests,
+                    kind=st.spec.kind,
                 )
             except GenerationError as exc:
-                log(f"developer review patch failed: {exc}")
+                st.status = "unresolved_review"
+                st.error = f"review patch LLM call failed ({exc}); re-running later may succeed"
+                break
             if st.code.files == before:
                 st.status = "unresolved_review"
                 st.error = "review patch produced no change; stopping instead of looping"

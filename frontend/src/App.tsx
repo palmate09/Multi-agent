@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, setUnauthorizedHandler, subscribeToRun } from "./api";
 import type { Health, PipelineEvent, RunDetail, RunSummary } from "./types";
 import { statusTone } from "./types";
+import { ConfirmModal } from "./components/ConfirmModal";
 import { EvalPanel } from "./components/EvalPanel";
 import { FileViewer } from "./components/FileViewer";
 import { LoginPage } from "./components/LoginPage";
@@ -10,11 +11,12 @@ import { PipelineTimeline } from "./components/PipelineTimeline";
 import { RequirementForm } from "./components/RequirementForm";
 import { RunList } from "./components/RunList";
 
-type Tab = "pipeline" | "stories" | "spec" | "code" | "tests" | "report" | "review";
+type Tab = "pipeline" | "stories" | "plan" | "spec" | "code" | "tests" | "report" | "review";
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: "pipeline", label: "Pipeline" },
   { id: "stories", label: "Stories" },
+  { id: "plan", label: "Plan" },
   { id: "spec", label: "OpenAPI" },
   { id: "code", label: "Code" },
   { id: "tests", label: "Tests" },
@@ -144,7 +146,7 @@ export default function App() {
         .getRun(selected)
         .then((d) => d.status)
         .catch(() => "unknown");
-      if (current === "queued" || current === "running") {
+      if (current === "queued" || current === "running" || current === "stopping") {
         timer = setTimeout(tick, POLL_MS);
       } else {
         refreshRuns();
@@ -180,7 +182,7 @@ export default function App() {
 
   const startRun = async (
     requirement: string,
-    opts: { skipTester: boolean; skipReviewer: boolean }
+    opts: { skipTester: boolean; skipReviewer: boolean; skipReasoner: boolean }
   ) => {
     setBusy(true);
     setError(null);
@@ -189,6 +191,7 @@ export default function App() {
         requirement,
         skip_tester: opts.skipTester,
         skip_reviewer: opts.skipReviewer,
+        skip_reasoner: opts.skipReasoner,
       });
       setLiveEvents([]);
       await refreshRuns();
@@ -210,6 +213,56 @@ export default function App() {
     }
   };
 
+  const [stopping, setStopping] = useState(false);
+  const [restartTarget, setRestartTarget] = useState<string | null>(null);
+  const [restartBusy, setRestartBusy] = useState(false);
+  const [resuming, setResuming] = useState(false);
+  const stopRun = async (id: string) => {
+    setStopping(true);
+    setError(null);
+    try {
+      await api.stopRun(id);
+      await loadDetail(id);
+      await refreshRuns();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to stop run");
+    } finally {
+      setStopping(false);
+    }
+  };
+
+  const confirmRestart = async () => {
+    if (!restartTarget) return;
+    setRestartBusy(true);
+    setError(null);
+    try {
+      const next = await api.restartRun(restartTarget);
+      setRestartTarget(null);
+      setLiveEvents([]);
+      await refreshRuns();
+      setSelected(next.run_id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to restart run");
+    } finally {
+      setRestartBusy(false);
+    }
+  };
+
+  const resumeRun = async (id: string) => {
+    setResuming(true);
+    setError(null);
+    try {
+      const next = await api.resumeRun(id);
+      setLiveEvents([]);
+      await refreshRuns();
+      setSelected(next.run_id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to resume run");
+    } finally {
+      setResuming(false);
+    }
+  };
+
   const events = useMemo<PipelineEvent[]>(() => {
     const fromPoll = detail?.events ?? [];
     const seen = new Set(fromPoll.map((e) => e.seq));
@@ -218,6 +271,18 @@ export default function App() {
   }, [detail, liveEvents]);
 
   const running = detail?.status === "running" || detail?.status === "queued";
+  const stoppingNow = detail?.status === "stopping" || stopping;
+  const stoppable = detail?.status === "running" || detail?.status === "queued";
+  // Restart is offered on every settled run: it deletes all data and starts
+  // over, which is meaningful for failed and accepted runs alike. Resume
+  // continues a non-accepted terminal run from its saved artifacts.
+  const restartable =
+    !!detail && !stoppable && detail.status !== "stopping";
+  const resumable =
+    !!detail &&
+    ["cancelled", "unresolved", "unresolved_review", "failed", "blocked", "domain_missed"].includes(
+      detail.status
+    );
   const tone = statusTone(detail?.status ?? "idle");
 
   const llmLabel = health
@@ -294,9 +359,51 @@ export default function App() {
                       Run <code>{detail.run_id}</code>
                     </h2>
                     <span className={`badge ${tone}`}>
-                      <span className={`dot${running ? " pulse" : ""}`} />
+                      <span className={`dot${running || stoppingNow ? " pulse" : ""}`} />
                       {detail.status}
                     </span>
+                    {stoppable && (
+                      <button
+                        className="ghost"
+                        style={{ marginLeft: 8 }}
+                        disabled={stopping}
+                        onClick={() => void stopRun(detail.run_id)}
+                        title="Request cancellation; the run settles at cancelled"
+                      >
+                        {stopping ? "Stopping…" : "Stop"}
+                      </button>
+                    )}
+                    {stoppingNow && !stoppable && (
+                      <span className="hint" style={{ marginLeft: 8 }}>
+                        Stopping…
+                      </span>
+                    )}
+                    {restartable && (
+                      <button
+                        className="ghost"
+                        style={{ marginLeft: 8 }}
+                        onClick={() => setRestartTarget(detail.run_id)}
+                        title="Delete all of this run's data and start over"
+                      >
+                        Restart
+                      </button>
+                    )}
+                    {resumable && (
+                      <button
+                        className="ghost"
+                        style={{ marginLeft: 8 }}
+                        disabled={resuming}
+                        onClick={() => void resumeRun(detail.run_id)}
+                        title="Continue this run from its saved artifacts (nothing is deleted)"
+                      >
+                        {resuming ? "Resuming…" : "Resume"}
+                      </button>
+                    )}
+                    {detail.resumed_from && (
+                      <span className="hint" style={{ marginLeft: 8 }}>
+                        Resumed from <code>{detail.resumed_from}</code>
+                      </span>
+                    )}
                     {detail.error && (
                       <span className="hint" style={{ marginLeft: 8 }}>
                         {detail.error}
@@ -390,6 +497,50 @@ export default function App() {
                   <p className="empty">No stories yet.</p>
                 ))}
 
+              {tab === "plan" &&
+                (detail.plan ? (
+                  <div className="card plan">
+                    {!detail.plan.structured && (
+                      <div className="alert note">
+                        The model answered in prose instead of the JSON block, so this is its
+                        own wording rather than a parsed plan.
+                      </div>
+                    )}
+                    <h3>Approach</h3>
+                    <p className="approach">{detail.plan.approach}</p>
+                    {(
+                      [
+                        ["Decisions", detail.plan.decisions],
+                        ["Risks", detail.plan.risks],
+                        ["Edge cases", detail.plan.edge_cases],
+                        ["Open questions", detail.plan.open_questions],
+                      ] as Array<[string, string[]]>
+                    ).map(([title, items]) =>
+                      items.length ? (
+                        <div key={title} className="section">
+                          <div className="hint caps">
+                            {title} ({items.length})
+                          </div>
+                          <ul>
+                            {items.map((it, i) => (
+                              <li key={i}>{it}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null
+                    )}
+                    <p className="hint footer">
+                      Advisory: it guides the Designer and Developer. The Tester and Reviewer
+                      never see it — a run is graded on its contract and its tests.
+                    </p>
+                  </div>
+                ) : (
+                  <p className="empty">
+                    No plan yet. The reasoner node has not produced one, or it was ablated for
+                    this run.
+                  </p>
+                ))}
+
               {tab === "spec" &&
                 (detail.spec ? (
                   <pre className="code">{detail.spec}</pre>
@@ -457,6 +608,29 @@ export default function App() {
           </div>
         </main>
       </div>
+
+      {restartTarget && (
+        <ConfirmModal
+          title={`Restart run ${restartTarget}?`}
+          body={
+            <>
+              <p>
+                This will stop the pipeline if it is still running,{" "}
+                <strong>permanently delete all of this run&apos;s data</strong>{" "}
+                (stories, spec, code, tests, reports), and start a fresh run
+                with the same requirement.
+              </p>
+              <p className="hint">This cannot be undone.</p>
+            </>
+          }
+          confirmLabel="Delete data and restart"
+          busy={restartBusy}
+          onConfirm={() => void confirmRestart()}
+          onCancel={() => {
+            if (!restartBusy) setRestartTarget(null);
+          }}
+        />
+      )}
     </div>
   );
 }

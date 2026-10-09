@@ -14,7 +14,8 @@ deploys to a GCP VM.
 ## Architecture
 
 ```
-Requirement -> PM (stories) -> Designer (OpenAPI + file plan) -> Developer
+Requirement -> PM (stories) -> Reasoner (plan: approach/risks/edge cases)
+  -> Designer (OpenAPI + file plan) -> Developer
   -> domain coverage gate -> boot check -> Tester || (developer self-checks)
   -> Sandbox Runner -> triage+reflection -> Developer -> Reviewer (ruff+bandit) -> done
 ```
@@ -181,6 +182,44 @@ OLLAMA_MODEL_DEVELOPER=qwen2.5-coder:3b                 # ~2x faster on CPU
 If no backend answers, the run is `blocked` with the per-backend errors in
 `GraphState.error`. Every call is logged to `$RUNS_DIR/llm_log.jsonl` with its
 latency and the reason each fallback declined.
+
+### Reasoning
+
+Some roles are allowed to think before they answer. The thinking is returned
+separately — in `meta["reasoning"]` and in the call log — so a `<thinking>` block
+can never end up in front of the YAML the Designer parses.
+
+```bash
+LLM_REASONING_ROLES=pm,reasoner,designer,developer,tester,triage,reflection  # reviewer is off
+LLM_REASONING_EFFORT=medium        # clamped to what the serving model accepts
+LLM_REASONING=0                    # kill switch for the whole pipeline
+LLM_REASONING_ROLE_REVIEWER=1      # add one role back
+```
+
+`GROQ_REASONING_MODEL` / `OPENROUTER_REASONING_MODEL` lead the roster with a
+reasoning-capable id when such a role asks (`gpt-oss`, `qwen3` otherwise).
+Gemini gets `thinkingConfig` with `LLM_REASONING_BUDGET` (or
+`GEMINI_THINKING_LEVEL` on 3.x). Every call's ceiling is doubled while
+reasoning, because thinking is billed against the answer's budget — a cap sized
+for the answer alone comes back as empty content.
+
+### The plan node
+
+Between the PM and the Designer, the Reasoner writes a plan — approach,
+decisions, risks, edge cases, open questions — to `outputs/<run>/reasoning.json`
+and hands it to the Designer and Developer as context. It is advisory: the
+contract and the tests are still what a run is graded on, and neither the Tester
+nor the Reviewer sees it.
+
+```bash
+python cli.py --run "..." --no-reasoner     # ablate it
+curl -X POST /api/runs -d '{"requirement":"...","skip_reasoner":true}'
+```
+
+In the web UI it is the **Plan** tab beside *Stories* (approach, decisions,
+risks, edge cases, open questions), an **Ablate reasoner** checkbox on the form
+alongside the other ablations, and a labelled step in the pipeline timeline
+showing its risk and edge-case counts.
 
 ## Results
 

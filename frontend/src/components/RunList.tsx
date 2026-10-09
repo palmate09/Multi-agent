@@ -48,7 +48,7 @@ export function RunList({ runs, selected, onSelect, onDelete, onRefresh }: Props
             <div className="req">{run.requirement}</div>
             <div className="meta">
               <span className={`badge ${tone}`}>
-                <span className={`dot${run.status === "running" ? " pulse" : ""}`} />
+                <span className={`dot${run.status === "running" || run.status === "stopping" ? " pulse" : ""}`} />
                 {run.status}
               </span>
               <span>{shortTime(run.created_at)}</span>

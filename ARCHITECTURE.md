@@ -58,13 +58,14 @@ Each agent: one job, fixed in/out schema, measurable done condition, file in `ag
 | Agent | Takes in | Produces | Tools | Done when |
 |---|---|---|---|---|
 | Project Manager (`agents/pm.py`) | Requirement, status reports | UserStories, AC, task board, final summary, triage verdict | Task board JSON, message router | Every AC maps to ≥1 test |
-| Designer (`agents/designer.py`) | UserStories + requirement | OpenAPI YAML + **file plan** (`entrypoint`, `files`) | OpenAPI validator | Spec validates (shape only) + covers every story |
-| Developer (`agents/developer.py`) | ApiSpec + file plan + failure reports + reflections | FastAPI code + DB models | writes the planned files | App imports, lints clean, Tester suite passes |
+| Reasoner (`agents/reasoner.py`) | Requirement + UserStories | `Plan{approach, decisions, risks, edge_cases, open_questions}` | JSON block in its reply | Plan parses, or degrades to prose (advisory: never blocks) |
+| Designer (`agents/designer.py`) | UserStories + requirement + Plan | OpenAPI YAML + **file plan** (`entrypoint`, `files`) | OpenAPI validator | Spec validates (shape only) + covers every story |
+| Developer (`agents/developer.py`) | ApiSpec + file plan + failure reports + reflections + Plan | FastAPI code + DB models | writes the planned files | App imports, lints clean, Tester suite passes |
 | Tester (`agents/tester.py`) | ApiSpec + stories (NOT code) | pytest suite, coverage, bug reports | pytest, coverage, Docker shell | Each endpoint: success + validation + error tests |
 | Reviewer (`agents/reviewer.py`) | Code + tests + TestReport + ruff/bandit output | Ranked comments blocker/major/minor | ruff, bandit, diff reader | 0 blockers + spec conformance confirmed |
 
 Schemas (`schemas/messages.py`, Pydantic v2):
-`Requirement, UserStory, UserStories, ApiSpec{openapi_yaml, entrypoint, files, domain_terms}, CodeBundle{files, entry_module, entry_attr}, TestSuite, TestFailure, TestReport, ReviewComment, ReviewReport, CoverageReport, GraphState{retry_*, memory[], error}`.
+`Requirement, UserStory, UserStories, Plan{approach, decisions, risks, edge_cases, open_questions, structured}, ApiSpec{openapi_yaml, entrypoint, files, domain_terms}, CodeBundle{files, entry_module, entry_attr}, TestSuite, TestFailure, TestReport, ReviewComment, ReviewReport, CoverageReport, GraphState{retry_*, memory[], plan, error}`.
 
 **Entrypoint discovery** (`agents/introspect.py`) parses generated modules with
 `ast` to find the module-level `FastAPI()` instance and to enumerate route
@@ -73,7 +74,11 @@ cannot be mistaken for the real one.
 
 ## 4. Orchestration (`graph/workflow.py`, LangGraph)
 
-Nodes: `pm → designer → developer → coverage → boot → tester → runner → triage? → reviewer → final`.
+Nodes: `pm → reasoner → designer → developer → coverage → boot → tester → runner → triage? → reviewer → final`.
+`reasoner` is advisory and ablatable (`skip_reasoner`): it writes
+`reasoning.json` and hands `GraphState.plan` to the Designer and Developer.
+Neither the Tester nor the Reviewer is given the plan, so a run is still graded
+on its contract and its tests rather than on what the plan promised.
 Conditional edges:
 
 * `coverage -- ratio<0.6 --> final(status=domain_missed)`
@@ -130,7 +135,7 @@ All hand-offs saved under `outputs/<run_id>/` (MetaGPT inspectable-docs rule).
 
 ```
 ARCHITECTURE.md  EXECUTION_PLAN.md  README.md  requirements.txt  cli.py
-agents/    # pm.py designer.py developer.py tester.py reviewer.py llm.py __init__.py
+agents/    # pm.py reasoner.py designer.py developer.py tester.py reviewer.py llm.py __init__.py
 schemas/   # messages.py __init__.py
 graph/     # workflow.py __init__.py
 sandbox/   # Dockerfile runner.py run.sh __init__.py

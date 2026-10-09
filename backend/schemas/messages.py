@@ -23,6 +23,27 @@ class UserStories(BaseModel):
     clarifying_question: str | None = None
 
 
+class Plan(BaseModel):
+    """What the Reasoner worked out before anything is designed.
+
+    Advisory rather than binding: it is handed to the Designer and Developer as
+    context and written to ``reasoning.json`` for the human, but nothing
+    validates the generated code against it — the OpenAPI contract and the
+    public interface stay the only things a run is graded on.
+
+    ``structured`` is False when the model replied in prose and the JSON block
+    never parsed; ``approach`` then carries its raw words, which are still the
+    model's own reasoning rather than a canned answer.
+    """
+
+    approach: str = ""
+    decisions: list[str] = []
+    risks: list[str] = []
+    edge_cases: list[str] = []
+    open_questions: list[str] = []
+    structured: bool = True
+
+
 class ApiSpec(BaseModel):
     openapi_yaml: str
     endpoints: list[str] = []
@@ -35,6 +56,19 @@ class ApiSpec(BaseModel):
     # Entities the requirement named, used by the coverage gate so a generation
     # that silently substitutes a different domain cannot pass.
     domain_terms: list[str] = []
+
+    # ---- non-service projects ----
+    # "api" (the default) means an HTTP service: the contract above is OpenAPI
+    # and the app object is discovered from the code. "program" means a
+    # self-contained piece of software such as a game or a library, where an
+    # OpenAPI document would be an invention rather than a translation.
+    kind: Literal["api", "program"] = "api"
+    # For kind="program": a prose contract naming the modules, the entrypoint,
+    # the public interface and the behaviours that must hold.
+    contract_text: str = ""
+    # For kind="program": the symbols the implementation must expose, checked by
+    # the boot check and the Reviewer.
+    public_api: list[str] = []
 
 
 class CodeBundle(BaseModel):
@@ -106,6 +140,8 @@ class GraphState(BaseModel):
     requirement: str = ""
     run_id: str = "default"
     stories: UserStories | None = None
+    # The Reasoner's read on the requirement; None when the node is ablated.
+    plan: Plan | None = None
     spec: ApiSpec | None = None
     code: CodeBundle | None = None
     tests: TestSuite | None = None

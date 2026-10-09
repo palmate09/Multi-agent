@@ -7,7 +7,10 @@ const EXAMPLES = [
 ];
 
 interface Props {
-  onSubmit: (requirement: string, opts: { skipTester: boolean; skipReviewer: boolean }) => void;
+  onSubmit: (
+    requirement: string,
+    opts: { skipTester: boolean; skipReviewer: boolean; skipReasoner: boolean }
+  ) => void;
   busy: boolean;
   error: string | null;
 }
@@ -16,6 +19,7 @@ export function RequirementForm({ onSubmit, busy, error }: Props) {
   const [text, setText] = useState(EXAMPLES[0]);
   const [skipTester, setSkipTester] = useState(false);
   const [skipReviewer, setSkipReviewer] = useState(false);
+  const [skipReasoner, setSkipReasoner] = useState(false);
 
   const valid = text.trim().length >= 10;
 
@@ -33,6 +37,14 @@ export function RequirementForm({ onSubmit, busy, error }: Props) {
         />
       </div>
       <div className="field row" style={{ gap: 16 }}>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={skipReasoner}
+            onChange={(e) => setSkipReasoner(e.target.checked)}
+          />
+          Ablate reasoner
+        </label>
         <label className="check">
           <input
             type="checkbox"
@@ -55,7 +67,7 @@ export function RequirementForm({ onSubmit, busy, error }: Props) {
         <button
           className="primary"
           disabled={!valid || busy}
-          onClick={() => onSubmit(text.trim(), { skipTester, skipReviewer })}
+          onClick={() => onSubmit(text.trim(), { skipTester, skipReviewer, skipReasoner })}
         >
           {busy ? "Starting…" : "Run pipeline"}
         </button>

@@ -1,12 +1,16 @@
 """Sandbox runner: Docker (no net, limits) with local-subprocess fallback."""
 from __future__ import annotations
+
+import ast
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from schemas.messages import CodeBundle, TestSuite, TestReport, TestFailure
+
+from agents.introspect import find_app_object
+from schemas.messages import CodeBundle, TestFailure, TestReport, TestSuite
 
 PY = sys.executable or "python"
 
@@ -97,42 +101,142 @@ def run_tests(code: CodeBundle, tests: TestSuite, timeout: int = 60, use_docker:
     return run_tests_local(code, tests, timeout)
 
 
-def boot_check(code: CodeBundle, timeout: int = 60) -> tuple[bool, str]:
-    """Import the generated application and confirm the ASGI app exists.
+# Resolve each declared name against the modules actually generated. A contract
+# may name "LudoGame" or "LudoGame.roll_dice"; the defining module is inferred
+# by trying every generated module in turn.
+#
+# The body is substituted wholesale rather than formatted, because a format
+# placeholder would collide with the probe's own braces.
+_PROGRAM_PROBE = """import importlib
+
+WANTED = __WANTED__
+MODS = __MODS__
+
+
+def resolve(dotted, mod_name, mod):
+    parts = dotted.split('.')
+    stem = mod_name.rsplit('.', 1)[-1]
+    if parts and parts[0] == stem:
+        parts = parts[1:]
+    obj = mod
+    for i, attr in enumerate(parts):
+        if not hasattr(obj, attr):
+            # Instance attributes (self.x) are not visible on the class.
+            # Try instantiating the class and checking the instance.
+            if isinstance(obj, type):
+                try:
+                    inst = obj()
+                    if hasattr(inst, attr):
+                        obj = getattr(inst, attr)
+                        continue
+                except Exception:
+                    pass
+            return False
+        obj = getattr(obj, attr)
+    return True
+
+
+import_errors = []
+found, missing = [], []
+for _name in WANTED:
+    _ok = False
+    for _mod_name in MODS:
+        try:
+            _mod = importlib.import_module(_mod_name)
+        except Exception as _e:
+            import_errors.append(f"import {_mod_name}: {type(_e).__name__}: {_e}")
+            continue
+        try:
+            if resolve(_name, _mod_name, _mod):
+                _ok = True
+                break
+        except Exception:
+            continue
+    (found if _ok else missing).append(_name)
+
+print('boot-resolved', len(found), 'of', len(WANTED))
+if missing:
+    print('MISSING:' + ','.join(missing))
+if import_errors:
+    # The real reason nothing resolved: show the first import failure.
+    # Without this the developer sees "0 of N" and cannot fix a NameError.
+    print('IMPORT-ERROR:' + import_errors[0])
+"""
+
+
+
+
+def boot_check(
+    code: CodeBundle,
+    timeout: int = 60,
+    public_api: list[str] | None = None,
+) -> tuple[bool, str]:
+    """Import the generated code and confirm its entry point is usable.
 
     The module to import is resolved from the code (``agents.introspect``)
     rather than assumed to be ``main``: a real generation names the entrypoint
     whatever suits it, and hardcoding ``main`` reported "does not boot" for an
     app that imported perfectly well.
-    """
-    found = None
-    if code.entry_module:
-        found = (code.entry_module, code.entry_attr or "app")
-    if not found:
-        from agents.introspect import find_app_object
 
+    Passing ``public_api`` switches the check from "exposes a FastAPI app" to
+    "exposes these declared names", which is what a non-service project needs.
+    """
+    if public_api:
+        modules = _importable_modules(code)
+        if not modules:
+            return False, "no importable python module in the bundle"
+        probe = _PROGRAM_PROBE.replace(
+            "__WANTED__", repr(list(public_api))
+        ).replace("__MODS__", repr(modules))
+    else:
         found = find_app_object(code.files)
-    if not found:
-        return False, "no module assigns a FastAPI() app to a module-level name"
-    module, attr = found
-    tmp = Path(tempfile.mkdtemp(prefix="agent-boot-"))
-    try:
-        write_bundle(code, TestSuite(files={}), tmp)
+        if not found:
+            return False, "no module assigns a FastAPI() app to a module-level name"
+        module, attr = found
         probe = (
             f"import {module} as _m; "
             f"a = getattr(_m, {attr!r}, None); "
             f"assert a is not None, 'module has no {attr}'; "
             f"print('boot-ok', type(a).__name__)"
         )
-        p = subprocess.run([PY, "-c", probe], cwd=tmp, capture_output=True, text=True, timeout=timeout)
-        ok = "boot-ok" in p.stdout
+
+    tmp = Path(tempfile.mkdtemp(prefix="agent-boot-"))
+    try:
+        write_bundle(code, TestSuite(files={}), tmp)
+        p = subprocess.run(
+            [PY, "-c", probe], cwd=tmp, capture_output=True, text=True, timeout=timeout
+        )
+        if public_api:
+            # "boot-resolved 0 of 3" is not a pass: every declared name must
+            # actually resolve or the tests cannot import them.
+            ok = "MISSING:" not in p.stdout and "boot-resolved" in p.stdout
+        else:
+            ok = "boot-ok" in p.stdout
         return ok, (p.stdout + p.stderr)[-1000:]
     except subprocess.TimeoutExpired:
-        return False, f"import of {module} timed out after {timeout}s"
+        return False, f"import timed out after {timeout}s (a module probably blocks at import)"
     except Exception as e:
         return False, str(e)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+
+def _importable_modules(code: CodeBundle) -> list[str]:
+    """Dotted module names for each generated file, package-style where needed."""
+    out: list[str] = []
+    for path, body in sorted(code.files.items()):
+        if not path.endswith(".py"):
+            continue
+        try:
+            ast.parse(body)
+        except SyntaxError:
+            continue
+        rel = path[:-3].strip("/")
+        if rel.endswith(".__init__"):
+            rel = rel[: -len(".__init__")]
+        out.append(rel.replace("/", "."))
+    return out
 
 
 def static_analysis(code: CodeBundle) -> tuple[str, str]:

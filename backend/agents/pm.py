@@ -8,6 +8,7 @@ stories. There is no template now: a failure raises and the run is blocked.
 from __future__ import annotations
 
 import json
+import re
 
 from agents.llm import GenerationError, require
 from schemas.messages import TestReport, UserStories, UserStory
@@ -86,8 +87,48 @@ _STRONG_TEST_BUG = (
     'assert "error" in',
     "assert 'detail' in",
     'assert "detail" in',
+    "assert 'message' in",
+    'assert "message" in',
     "in response.json()",
     "in r.json()",
+)
+
+# The test assumed an interface the contract never declared: a getter that was
+# never implemented, a dict field the object never had, or an HTTP-style
+# response envelope on a plain function. Each of these sends the Developer off
+# to "fix" correct code, because no implementation change can satisfy them.
+_TEST_INVENTED_INTERFACE = re.compile(
+    r"attributeerror:.*object has no attribute '(?:get_|is_|has_)"
+    r"|attributeerror:.*has no setter"
+    r"|typeerror: attribute name must be string"
+    r"|typeerror: string indices must be integers"
+    r"|typeerror: list indices must be integers"
+    r"|keyerror: '[a-z][a-z0-9_]*'"
+    r"|assert \d{3} in \[\d{3}"
+    r"|where \d+ = get_current_player\(\)"
+    r"|not found in game object|hasattr\(game, attr\)",
+    re.I,
+)
+
+# A test that times out because it loops until a condition the implementation
+# may never satisfy (e.g. `while not game.is_game_over()`). The developer cannot
+# fix this; the test needs a bounded loop or a direct state setup.
+_TEST_TIMEOUT = re.compile(r"pytest timeout|timed out|timeout", re.I)
+
+# The suite cannot even be collected: the generated test file does not parse
+# (an unterminated docstring, a stray fence). Nothing about the application has
+# been exercised at this point, so the failure says nothing about the code.
+# Not gated on the pass count: with zero collected tests there is no pass count.
+_TEST_COLLECTION_ERROR = re.compile(
+    r"error collecting|mod = import_path|errors? on import|"
+    r"syntaxerror:.*(?:unterminated|expected|invalid)",
+    re.I,
+)
+
+# A test that patches a symbol the implementation never imports or calls, so the
+# patch silently does nothing and the assertion fails on unchanged state.
+_PATCHED_BUT_NO_EFFECT = re.compile(
+    r"assert\s+\d+\s*==\s*\d+", re.I
 )
 
 # Softer hints the LLM may still overrule.
@@ -98,7 +139,37 @@ _WEAK_TEST_BUG = (
     "test expects",
     "wrong url",
     "test bug",
+    # HTTP-style assertions against a non-HTTP program: the contract declares
+    # plain return values, so a {'status': 200} wrapper was invented by the test.
+    "status.*200",
+    "status.*400",
+    "status.*404",
+    "dice_resp",
+    "move_resp",
 )
+
+# A test asserting an error status where the app returned a success status. The
+# request was valid, so the expectation is impossible to satisfy. Seen in a real
+# run where the suite did GET /appointments/ and demanded 4xx, while a
+# trailing-slash request on a collection is a legitimate list request returning
+# 200. Routing that to the Developer sends it "fixing" correct code.
+_2XX_VS_ERROR_ASSERT = re.compile(
+    r"assert\s+4\d\d\s*(?:<=|==)\s*resp(?:onse)?\.?status_code"  # assert 4xx <= resp.status_code
+    r"|assert\s+resp(?:onse)?\.?status_code\s*(?:<|<=)\s*500"
+    r"|= <Response \[2\d\d",
+    re.I,
+)
+
+# The app crashes copying a live resource: a route handler takes a session
+# object as a default argument (``db=SessionLocal()``), FastAPI deepcopies
+# parameter defaults when it builds each route, and a SQLAlchemy session
+# references the DBAPI module, which cannot be copied
+# (``TypeError: cannot pickle 'module'``). Seen in a real run where all 9
+# tests failed identically and the LLM triage misrouted to the Tester twice
+# before the Developer stalled with no change. Only the implementation can fix
+# this, so it leads the deterministic checks: an app-runtime traceback naming
+# the ORM can never be a bad test expectation.
+_SESSION_COPY_CTX = ("sqlalchemy", "deepcopy", "dbapi", "sessionmaker")
 
 
 def triage(report: TestReport) -> str:
@@ -110,17 +181,47 @@ def triage(report: TestReport) -> str:
     """
     if not report.failures:
         return "code_bug"
-    blob = " ".join(f.name + " " + f.error for f in report.failures).lower()
+    # The raw output matters: a suite that fails to even be collected reports
+    # no individual failures, so a blob built from them alone is empty.
+    blob = (
+        " ".join(f.name + " " + f.error for f in report.failures)
+        + " "
+        + (report.raw or "")
+    ).lower()
 
     # Only meaningful when other tests pass. A suite failing everywhere is a
     # broken application, not a bad expectation.
     enough_passing = report.passed >= 3
+
+    if "cannot pickle" in blob and any(m in blob for m in _SESSION_COPY_CTX):
+        return "code_bug"
 
     if enough_passing and any(m in blob for m in _STRONG_TEST_BUG):
         # Decided without consulting the model. This shape of failure is
         # unambiguous, and the model previously talked itself out of it: a real
         # run rewrote correct code four times because it judged a
         # status-code-correct response "code_bug".
+        return "test_bug"
+
+    if enough_passing and _2XX_VS_ERROR_ASSERT.search(blob):
+        # The app answered 2xx to a valid request while the test insisted on an
+        # error status. No implementation can satisfy that.
+        return "test_bug"
+
+    if _TEST_INVENTED_INTERFACE.search(blob):
+        # The test drove an interface the contract never declared. No code
+        # change can satisfy it, so it has to be rewritten against the contract.
+        return "test_bug"
+
+    if _TEST_COLLECTION_ERROR.search(blob):
+        # The suite did not parse, so no assertion ever ran. This is the Tester's
+        # output being malformed, not a statement about the application.
+        return "test_bug"
+
+    if _TEST_TIMEOUT.search(blob):
+        # A test that times out is almost always looping until a condition the
+        # implementation may never satisfy. The developer cannot fix this; the
+        # test needs a bounded loop or a direct state setup.
         return "test_bug"
 
     verdict = (

@@ -202,3 +202,104 @@ def uncovered_spec_endpoints(spec_yaml: str, files: dict[str, str]) -> list[tupl
         if normalise_path(path) not in code:
             missing.append((path, method))
     return missing
+
+
+def public_surface(files: dict[str, str], names: list[str]) -> str:
+    """Signatures and docstring leads for the declared public names.
+
+    The Tester writes tests without the implementation, so it has to guess the
+    shape of anything the contract did not spell out. A real run guessed that
+    ``get_token_positions()`` was keyed by token id when it is keyed by player,
+    and the resulting ``IndexError`` sent the Developer off to patch correct
+    code.
+
+    Handing over the *interface* rather than the bodies keeps the tests
+    independently written while still telling the Tester what a call returns.
+    """
+    wanted = {n.split(".")[0] for n in names}
+    methods = {n for n in names if "." in n}
+    out: list[str] = []
+    for path, body in sorted(files.items()):
+        if not path.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(body)
+        except SyntaxError:
+            continue
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and node.name in wanted:
+                doc = _lead_doc(node)
+                out.append(f"class {node.name}{doc}")
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        target = f"{node.name}.{item.name}"
+                        if target in methods or item.name in methods:
+                            out.append(f"    {_signature(item)}{_lead_doc(item)}")
+                for item in node.body:
+                    if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                        out.append(f"    {item.target.id}: {_unparse(item.annotation)}")
+                # Instance attributes are where the type surprises the Tester: a
+                # test assumed `current_player` was a Player and called a method
+                # on it, when it is an int.
+                for item in _init_assignments(node):
+                    out.append(f"    {item}")
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in wanted:
+                out.append(f"def {_signature(node)}{_lead_doc(node)}")
+            elif isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id in wanted for t in node.targets
+            ):
+                for t in node.targets:
+                    if isinstance(t, ast.Name) and t.id in wanted:
+                        out.append(f"{t.id} = <module-level value>{_lead_doc(node)}")
+    return "\n".join(out)
+
+
+def _init_assignments(cls) -> list[str]:
+    """``self.x`` assignments in ``__init__``, with the value if it is a literal.
+
+    A bare ``self.x = ...`` tells the Tester nothing; the literal is what stops
+    it assuming an object where the code stores a plain index.
+    """
+    found: list[str] = []
+    for item in cls.body:
+        if not isinstance(item, ast.FunctionDef) or item.name != "__init__":
+            continue
+        for sub in ast.walk(item):
+            if isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Attribute):
+                if isinstance(sub.target.value, ast.Name) and sub.target.value.id == "self":
+                    found.append(f"{sub.target.attr}: {_unparse(sub.annotation)}")
+            elif isinstance(sub, ast.Assign):
+                for t in sub.targets:
+                    if (
+                        isinstance(t, ast.Attribute)
+                        and isinstance(t.value, ast.Name)
+                        and t.value.id == "self"
+                    ):
+                        try:
+                            found.append(f"{t.attr} = {_unparse(sub.value)}")
+                        except Exception:
+                            found.append(f"{t.attr} = <value>")
+    seen: set[str] = set()
+    return [f for f in found if not (f.split(" ")[0] in seen or seen.add(f.split(" ")[0]))]
+
+
+def _signature(node) -> str:
+    try:
+        params = ast.unparse(node.args)
+        prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+        returns = f" -> {_unparse(node.returns)}" if node.returns else ""
+        return f"{prefix} {node.name}({params}){returns}"
+    except Exception:
+        return f"{node.name}(...)"
+
+
+def _unparse(node) -> str:
+    try:
+        return ast.unparse(node)
+    except Exception:
+        return "?"
+
+
+def _lead_doc(node) -> str:
+    doc = ast.get_docstring(node)
+    return f"  # {doc.splitlines()[0]}" if doc else ""
