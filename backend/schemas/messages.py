@@ -36,6 +36,19 @@ class ApiSpec(BaseModel):
     # that silently substitutes a different domain cannot pass.
     domain_terms: list[str] = []
 
+    # ---- non-service projects ----
+    # "api" (the default) means an HTTP service: the contract above is OpenAPI
+    # and the app object is discovered from the code. "program" means a
+    # self-contained piece of software such as a game or a library, where an
+    # OpenAPI document would be an invention rather than a translation.
+    kind: Literal["api", "program"] = "api"
+    # For kind="program": a prose contract naming the modules, the entrypoint,
+    # the public interface and the behaviours that must hold.
+    contract_text: str = ""
+    # For kind="program": the symbols the implementation must expose, checked by
+    # the boot check and the Reviewer.
+    public_api: list[str] = []
+
 
 class CodeBundle(BaseModel):
     files: dict[str, str]  # path -> content

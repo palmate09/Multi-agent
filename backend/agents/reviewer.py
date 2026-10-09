@@ -72,6 +72,131 @@ def _declares_validation(code: CodeBundle) -> bool:
 def _static_checks(
     code: CodeBundle, spec: ApiSpec, tests: TestSuite, report: TestReport
 ) -> list[ReviewComment]:
+    """Findings for the project kind, plus the checks that apply to both."""
+    if spec.kind == "program":
+        return _program_checks(code, spec, tests) + _universal_checks(code, tests, report)
+    return _api_checks(code, spec, tests, report) + _universal_checks(code, tests, report)
+
+
+def _declared_symbols_present(code: CodeBundle, names: list[str]) -> list[str]:
+    """Dotted names from the contract that no generated module exposes.
+
+    Checked by AST rather than by importing: import-time side effects make
+    importing untrusted generated code a bad idea inside the review pass.
+    """
+    import ast as _ast
+
+    top_level: dict[str, set[str]] = {}
+    for path, body in code.files.items():
+        if not path.endswith(".py"):
+            continue
+        try:
+            tree = _ast.parse(body)
+        except SyntaxError:
+            continue
+        stem = path[:-3].split("/")[-1]
+        names_here = top_level.setdefault(stem, set())
+        for node in tree.body:
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                names_here.add(node.name)
+            elif isinstance(node, _ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, _ast.Name):
+                        names_here.add(target.id)
+            elif isinstance(node, (_ast.Import, _ast.ImportFrom)):
+                for alias in node.names:
+                    names_here.add(alias.asname or alias.name.split(".")[0])
+
+    missing: list[str] = []
+    for dotted in names:
+        parts = dotted.split(".")
+        if all(p in top_level.get(parts[0], set()) for p in parts[:1]) and len(parts) == 1:
+            continue
+        # Fall back to searching any module that defines the head symbol.
+        head = parts[0]
+        holder = next((mods for mods in top_level.values() if head in mods), None)
+        if holder is None:
+            missing.append(dotted)
+            continue
+        if len(parts) > 1:
+            # Members cannot be resolved statically; the boot check covers those.
+            continue
+    return missing
+
+
+def _universal_checks(code: CodeBundle, tests: TestSuite, report: TestReport) -> list[ReviewComment]:
+    """Checks that apply whatever the project is."""
+    out: list[ReviewComment] = []
+
+    # Unsafe constructs, whatever the domain.
+    for name, src in code.files.items():
+        if name.endswith(".py") and _UNSAFE.search(src):
+            out.append(
+                ReviewComment(
+                    severity="blocker",
+                    message="Unsafe pattern (eval/exec or interpolated SQL)",
+                    location=name,
+                )
+            )
+
+    tests_body = "\n".join(tests.files.values())
+    if "def test_" not in tests_body:
+        out.append(ReviewComment(severity="blocker", message="No tests found", location="tests"))
+
+    return out
+
+
+def _program_checks(code: CodeBundle, spec: ApiSpec, tests: TestSuite) -> list[ReviewComment]:
+    """A program must implement its declared interface and be tested against it."""
+    out: list[ReviewComment] = []
+
+    for name in _declared_symbols_present(code, spec.public_api):
+        out.append(
+            ReviewComment(
+                severity="blocker",
+                message=f"Contract declares {name!r} but no module defines it",
+                location=spec.entrypoint,
+            )
+        )
+
+    # A web layer in a non-service project means the contract was misread.
+    if re.search(r"=\s*FastAPI\s*\(", "\n".join(code.files.values())):
+        out.append(
+            ReviewComment(
+                severity="major",
+                message=(
+                    "This is not a web service, but the code builds a FastAPI app; "
+                    "the HTTP layer was not asked for"
+                ),
+                location="code",
+            )
+        )
+
+    tests_body = "\n".join(tests.files.values())
+    if re.search(r"=\s*FastAPI\s*\(|TestClient", tests_body):
+        out.append(
+            ReviewComment(
+                severity="blocker",
+                message="Tests drive an HTTP client, but this project is a program",
+                location="tests",
+            )
+        )
+    # Coverage of declared behaviours, by name.
+    stems = {f[:-3].split("/")[-1] for f in spec.files if f.endswith(".py")}
+    if stems and not any(re.search(rf"^\s*(?:import\s+{re.escape(s)}\b|from\s+{re.escape(s)}\s+import)", tests_body, re.M) for s in stems):
+        out.append(
+            ReviewComment(
+                severity="blocker",
+                message=f"Tests never import the program's modules ({', '.join(sorted(stems))})",
+                location="tests",
+            )
+        )
+    return out
+
+
+def _api_checks(
+    code: CodeBundle, spec: ApiSpec, tests: TestSuite, report: TestReport
+) -> list[ReviewComment]:
     out: list[ReviewComment] = []
 
     # 1. Every endpoint the spec declares must exist in the code.
@@ -139,17 +264,6 @@ def _static_checks(
                 location="code",
             )
         )
-
-    # 7. Unsafe constructs, whatever the domain.
-    for name, src in code.files.items():
-        if name.endswith(".py") and _UNSAFE.search(src):
-            out.append(
-                ReviewComment(
-                    severity="blocker",
-                    message="Unsafe pattern (eval/exec or interpolated SQL)",
-                    location=name,
-                )
-            )
 
     # 8. Tests must exist and cover the declared error codes.
     tests_body = "\n".join(tests.files.values())

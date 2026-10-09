@@ -94,7 +94,7 @@ paths:
 ```
 """
     monkeypatch.setattr(designer, "require", lambda *a, **k: (reply, {"ok": True}))
-    spec = designer.stories_to_spec(_stories(), requirement="a library that lends books")
+    spec = designer.stories_to_spec(_stories(), requirement="Build a REST API for a library that lends books")
     assert spec.entrypoint == "service.py"
     assert spec.files == ["service.py", "models.py"]
     assert "/loans" in spec.endpoints
@@ -103,7 +103,7 @@ paths:
 def test_designer_defaults_plan_when_model_omits_it(monkeypatch):
     reply = "```yaml\nopenapi: 3.1.0\ninfo: {title: L, version: 1.0.0}\npaths:\n  /loans:\n    post:\n      responses: {'201': {description: ok}}\n```"
     monkeypatch.setattr(designer, "require", lambda *a, **k: (reply, {"ok": True}))
-    spec = designer.stories_to_spec(_stories(), requirement="a library that lends books")
+    spec = designer.stories_to_spec(_stories(), requirement="Build a REST API for a library that lends books")
     assert spec.entrypoint.endswith(".py")
     assert spec.entrypoint in spec.files
 
@@ -117,7 +117,7 @@ def test_designer_raises_after_three_bad_attempts(monkeypatch):
 
     monkeypatch.setattr(designer, "require", always_bad)
     with pytest.raises(llm.GenerationError, match="valid OpenAPI"):
-        designer.stories_to_spec(_stories(), requirement="a library that lends books")
+        designer.stories_to_spec(_stories(), requirement="Build a REST API for a library that lends books")
     assert calls["n"] == 3
 
 
@@ -444,7 +444,7 @@ def test_tester_prompt_forbids_over_specified_error_bodies(monkeypatch):
     tester.spec_to_tests(
         ApiSpec(openapi_yaml="openapi: 3.1.0"), _stories(), entry_module="app", entry_attr="app"
     )
-    sop = tester.SOP
+    sop = tester._API_SOP
     assert "shape of an error body" in sop
     assert "status code" in sop
 
@@ -496,5 +496,5 @@ def test_triage_never_misroutes_real_code_bugs(monkeypatch, error):
 
 
 def test_tester_prompt_forbids_impossible_error_assertions():
-    assert "must be satisfiable" in tester.SOP
-    assert "valid list request and returns" in tester.SOP
+    assert "must be satisfiable" in tester._API_SOP
+    assert "valid list request and returns" in tester._API_SOP

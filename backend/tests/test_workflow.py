@@ -172,7 +172,7 @@ def test_fix_loop_stops_when_patch_changes_nothing(monkeypatch, tmp_path):
     monkeypatch.setattr(
         developer,
         "patch_code",
-        lambda code, report, refl: CodeBundle(
+        lambda code, report, refl, tests=None, kind="api": CodeBundle(
             files=dict(code.files),
             entry_module=code.entry_module,
             entry_attr=code.entry_attr,
@@ -212,7 +212,7 @@ def test_fix_loop_applies_a_real_change(monkeypatch, tmp_path):
     monkeypatch.setattr(
         developer,
         "patch_code",
-        lambda code, report, refl: CodeBundle(
+        lambda code, report, refl, tests=None, kind="api": CodeBundle(
             files={"app.py": code.files["app.py"] + "\n# patched\n"},
             entry_module=code.entry_module,
             entry_attr=code.entry_attr,
@@ -264,7 +264,7 @@ def test_boot_failure_is_reported(monkeypatch, tmp_path):
     monkeypatch.setattr(
         Workflow.Runner,
         "boot_check",
-        lambda code, timeout=60: (False, "ModuleNotFoundError: nonexistent_module_xyz"),
+        lambda code, timeout=60, public_api=None: (False, "ModuleNotFoundError: nonexistent_module_xyz"),
     )
     st = run_team(LIBRARY, out_dir=str(tmp_path / "boot"))
     assert st.status == "unresolved"
@@ -334,7 +334,7 @@ def test_boot_failure_enters_the_fix_loop(monkeypatch, tmp_path):
 
     boots = {"n": 0}
 
-    def fake_boot(code, timeout=60):
+    def fake_boot(code, timeout=60, public_api=None):
         boots["n"] += 1
         # Fails once with a fixable error, then imports.
         if boots["n"] == 1:
@@ -346,7 +346,7 @@ def test_boot_failure_enters_the_fix_loop(monkeypatch, tmp_path):
     monkeypatch.setattr(
         developer,
         "patch_code",
-        lambda code, report, refl: CodeBundle(
+        lambda code, report, refl, tests=None, kind="api": CodeBundle(
             files={"app.py": code.files["app.py"] + "\n# fixed import\n"},
             entry_module=code.entry_module,
             entry_attr=code.entry_attr,

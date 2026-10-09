@@ -54,10 +54,25 @@ def _write_code(out: Path, code) -> None:
 def _self_checks(spec) -> str:
     """A smoke test used only when the Tester is ablated.
 
-    Verifies the app is importable and that every route the spec declares is
-    actually registered. Deliberately minimal: with the Tester ablated there is
-    no independent check of behaviour, which is what the ablation demonstrates.
+    Deliberately minimal: with the Tester ablated there is no independent check
+    of behaviour, which is exactly what the ablation demonstrates. For an API
+    it checks the routes are registered; for a program it checks the declared
+    interface resolves.
     """
+    if getattr(spec, "kind", "api") == "program":
+        names = ", ".join(repr(n) for n in spec.public_api)
+        module = spec.entrypoint[:-3] if spec.entrypoint.endswith(".py") else spec.entrypoint
+        return f'''"""Ablated run: developer-authored smoke checks only."""
+import {module}
+
+
+def test_declared_interface_present():
+    for name in [{names}]:
+        target = {module}
+        for part in name.split('.'):
+            assert hasattr(target, part), f"missing {{name}}"
+            target = getattr(target, part)
+'''
     pairs, _paths = spec_paths(spec.openapi_yaml)
     paths = sorted({p for p, _ in pairs} - {"/health"})
     checks = "\n".join(
@@ -157,7 +172,16 @@ def run_team(
         _save(
             out,
             "plan.json",
-            json.dumps({"entrypoint": st.spec.entrypoint, "files": st.spec.files}, indent=2),
+            json.dumps(
+                {
+                    "kind": st.spec.kind,
+                    "entrypoint": st.spec.entrypoint,
+                    "files": st.spec.files,
+                    "public_api": st.spec.public_api,
+                    "contract_text": st.spec.contract_text,
+                },
+                indent=2,
+            ),
         )
         emit(
             "designer",
@@ -186,13 +210,16 @@ def run_team(
         # where a failing pytest cycle costs a whole generation plus a run.
         lint_out, _ = Runner.static_analysis(st.code)
         if lint_out:
-            st.code = Developer.repair_lint(st.code, lint_out)
+            st.code = Developer.repair_lint(st.code, lint_out, kind=st.spec.kind)
             _write_code(out, st.code)
             emit("developer", "progress", {"detail": "lint repair pass complete"})
 
         # Coverage gate, before any test is graded: a generation that ignored
         # the requested domain must not be able to report success.
-        verdict = coverage_check(requirement, st.code.files, all_routes(st.code.files))
+        # Only an HTTP service contributes route paths to the domain check; a
+        # program's vocabulary lives in its modules and symbols.
+        routes = all_routes(st.code.files) if st.spec.kind == "api" else set()
+        verdict = coverage_check(requirement, st.code.files, routes)
         st.coverage = CoverageReport(
             covered=verdict.covered,
             missing=verdict.missing,
@@ -214,8 +241,10 @@ def run_team(
             _finish(out, st, t0, emit)
             return st
 
-        # Boot check: the app must import before tests are worth running.
-        booted, boot_msg = Runner.boot_check(st.code)
+        # Boot check: the code must import, and expose what the contract declares.
+        # A program declares a public interface rather than an ASGI app object.
+        declared = st.spec.public_api if st.spec.kind == "program" else None
+        booted, boot_msg = Runner.boot_check(st.code, public_api=declared)
         _save(out, "boot.txt", boot_msg)
         emit("runner", "progress", {"detail": f"boot check: {'ok' if booted else 'FAILED'}"})
 
@@ -243,6 +272,7 @@ def run_team(
                             raw=boot_msg[-2000:],
                         ),
                         refl,
+                        kind=st.spec.kind,
                     )
                 except GenerationError as exc:
                     log(f"boot repair failed: {exc}")
@@ -258,7 +288,7 @@ def run_team(
                 st.retry_dev += 1
                 _write_code(out, st.code)
                 emit("developer", "start", {"reason": "boot_failure", "retry": st.retry_dev})
-                booted, boot_msg = Runner.boot_check(st.code)
+                booted, boot_msg = Runner.boot_check(st.code, public_api=declared)
                 _save(out, "boot.txt", boot_msg)
                 emit(
                     "runner", "progress", {"detail": f"boot check: {'ok' if booted else 'FAILED'}"}
@@ -268,7 +298,7 @@ def run_team(
                 st.retry_dev += 1
                 _write_code(out, st.code)
                 emit("developer", "start", {"reason": "boot_failure", "retry": st.retry_dev})
-                booted, boot_msg = Runner.boot_check(st.code)
+                booted, boot_msg = Runner.boot_check(st.code, public_api=declared)
                 _save(out, "boot.txt", boot_msg)
                 emit(
                     "runner", "progress", {"detail": f"boot check: {'ok' if booted else 'FAILED'}"}
@@ -297,6 +327,7 @@ def run_team(
                 st.stories,
                 entry_module=st.code.entry_module,
                 entry_attr=st.code.entry_attr,
+                code=st.code,
             )
             for rel, c in st.tests.files.items():
                 p = out / "tests" / rel
@@ -332,7 +363,7 @@ def run_team(
             break
 
         verdict_txt = PM.triage(st.report)
-        refl = Developer.reflect(st.report)
+        refl = Developer.reflect(st.report, kind=st.spec.kind)
         st.memory.append(refl)
         _save(out, "reflections.json", json.dumps(st.memory, indent=2))
         emit(
@@ -356,6 +387,7 @@ def run_team(
                     st.stories,
                     entry_module=st.code.entry_module,
                     entry_attr=st.code.entry_attr,
+                    code=st.code,
                 )
             except GenerationError as exc:
                 log(f"tester regeneration failed: {exc}")
@@ -367,7 +399,7 @@ def run_team(
             st.error = f"tests still failing after {st.retry_dev} developer retries"
             break
         try:
-            st.code = Developer.patch_code(st.code, st.report, refl)
+            st.code = Developer.patch_code(st.code, st.report, refl, tests=st.tests, kind=st.spec.kind)
         except GenerationError as exc:
             log(f"developer patch failed: {exc}")
         if st.code.files == before:
@@ -379,9 +411,16 @@ def run_team(
         st.retry_dev += 1
         _write_code(out, st.code)
         emit("developer", "start", {"reason": verdict_txt, "retry": st.retry_dev})
-        # Re-verify the entrypoint still resolves after a patch.
-        found = st.code.entry_module
-        if not found:
+        # Re-verify the entrypoint still resolves after a patch. A program has
+        # no ASGI app object; its entrypoint is the declared module.
+        if st.spec.kind == "program":
+            if not st.code.entry_module or not any(
+                f == st.spec.entrypoint for f in st.code.files
+            ):
+                st.status = "unresolved"
+                st.error = "patched code no longer contains the declared entrypoint"
+                break
+        elif not st.code.entry_module:
             st.status = "unresolved"
             st.error = "patched code no longer exposes an importable app object"
             break
@@ -426,6 +465,8 @@ def run_team(
                         raw="; ".join(c.message for c in st.review.blockers),
                     ),
                     "Review blockers to fix: " + "; ".join(c.message for c in st.review.blockers),
+                    tests=st.tests,
+                    kind=st.spec.kind,
                 )
             except GenerationError as exc:
                 log(f"developer review patch failed: {exc}")
