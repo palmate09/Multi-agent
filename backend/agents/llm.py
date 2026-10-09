@@ -506,6 +506,9 @@ def cloud_order() -> list[tuple[Any, str]]:
     ``openai``        OpenAI only (paid)
     ``local``         no hosted tier at all; Ollama only
     ``auto``          every hosted tier, in the order below
+    ``groq,gemini``   an explicit chain: Groq first, Gemini only when Groq
+                      declines (rate limit, outage). Unknown names are
+                      ignored; a chain with no known name behaves as ``auto``.
     ================  ==================================================
 
     Naming one provider matters on a free tier: ``auto`` would spend a request
@@ -524,6 +527,14 @@ def cloud_order() -> list[tuple[Any, str]]:
         return [tiers[provider]]
     if provider == "local":
         return []
+    if "," in provider:
+        ordered = []
+        for name in provider.split(","):
+            tier = tiers.get(name.strip())
+            if tier is not None and tier not in ordered:
+                ordered.append(tier)
+        if ordered:
+            return ordered
     return list(tiers.values())
 
 

@@ -600,3 +600,15 @@ def test_reviewer_allows_depends_injected_session():
 def test_tester_prompt_forbids_impossible_error_assertions():
     assert "must be satisfiable" in tester._API_SOP
     assert "valid list request and returns" in tester._API_SOP
+
+
+def test_cloud_order_supports_provider_chains(monkeypatch):
+    """LLM_PROVIDER=groq,gemini tries Groq first, Gemini only on decline."""
+    monkeypatch.setenv("LLM_PROVIDER", "groq,gemini")
+    assert [name for _, name in llm.cloud_order()] == ["groq/free", "gemini"]
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    assert [name for _, name in llm.cloud_order()] == ["groq/free"]
+    monkeypatch.setenv("LLM_PROVIDER", "bogus,gemini")
+    assert [name for _, name in llm.cloud_order()] == ["gemini"]
+    monkeypatch.setenv("LLM_PROVIDER", "bogus")
+    assert len(llm.cloud_order()) > 2, "unknown name falls back to auto"
