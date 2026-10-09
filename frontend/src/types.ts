@@ -3,6 +3,7 @@ export type Severity = "blocker" | "major" | "minor";
 export type PipelineNode =
   | "pipeline"
   | "pm"
+  | "reasoner"
   | "designer"
   | "developer"
   | "coverage"
@@ -37,6 +38,8 @@ export interface RunSummary {
   /** Files the Developer actually emitted; the layout follows the design. */
   files?: string[];
   error?: string | null;
+  /** Set when this run continues a previous one (resume); the old run id. */
+  resumed_from?: string | null;
 }
 
 /** Verdict from the domain coverage gate. */
@@ -58,6 +61,20 @@ export interface Stories {
   clarifying_question?: string | null;
 }
 
+/**
+ * What the Reasoner worked out before the spec existed. Advisory: nothing is
+ * graded against it, it is shown so a human can see what the run understood.
+ */
+export interface Plan {
+  approach: string;
+  decisions: string[];
+  risks: string[];
+  edge_cases: string[];
+  open_questions: string[];
+  /** False when the model answered in prose and the JSON block never parsed. */
+  structured: boolean;
+}
+
 export interface ReviewComment {
   severity: Severity;
   message: string;
@@ -68,6 +85,8 @@ export interface RunDetail extends RunSummary {
   events: PipelineEvent[];
   artifacts: string[];
   stories: Stories | null;
+  /** Plan from the Reasoner node; null when it was ablated or has not run. */
+  plan?: Plan | null;
   spec: string | null;
   code: Record<string, string>;
   tests: Record<string, string>;
@@ -118,6 +137,7 @@ export interface EvalResults {
 export const NODE_LABELS: Record<PipelineNode, string> = {
   pipeline: "Pipeline",
   pm: "PM",
+  reasoner: "Reasoner",
   designer: "Designer",
   developer: "Developer",
   coverage: "Domain check",
@@ -130,6 +150,7 @@ export const NODE_LABELS: Record<PipelineNode, string> = {
 
 export const NODE_ORDER: PipelineNode[] = [
   "pm",
+  "reasoner",
   "designer",
   "developer",
   "coverage",

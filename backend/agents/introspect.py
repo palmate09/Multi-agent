@@ -270,12 +270,15 @@ def _init_assignments(cls) -> list[str]:
                     found.append(f"{sub.target.attr}: {_unparse(sub.annotation)}")
             elif isinstance(sub, ast.Assign):
                 for t in sub.targets:
-                    if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name):
-                        if t.value.id == "self":
-                            try:
-                                found.append(f"{t.attr} = {_unparse(sub.value)}")
-                            except Exception:
-                                found.append(f"{t.attr} = <value>")
+                    if (
+                        isinstance(t, ast.Attribute)
+                        and isinstance(t.value, ast.Name)
+                        and t.value.id == "self"
+                    ):
+                        try:
+                            found.append(f"{t.attr} = {_unparse(sub.value)}")
+                        except Exception:
+                            found.append(f"{t.attr} = <value>")
     seen: set[str] = set()
     return [f for f in found if not (f.split(" ")[0] in seen or seen.add(f.split(" ")[0]))]
 

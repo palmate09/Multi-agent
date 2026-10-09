@@ -411,3 +411,296 @@ def test_groq_model_ids_are_the_live_ones(monkeypatch):
     assert "qwen3-32b" not in captured
     assert "llama-3.3-70b-versatile" not in captured
     assert src == ""
+
+
+# ------------------------------------------------------------- reasoning ----
+def test_reasoning_is_on_for_every_role_except_the_reviewer():
+    """The default set is every role whose answer improves from deliberation."""
+    for role in (
+        "pm",
+        "reasoner",
+        "designer",
+        "developer",
+        "tester",
+        "triage",
+        "reflection",
+    ):
+        assert llm.reasoning_requested(role) is True, role
+    assert llm.reasoning_requested("reviewer") is False
+
+
+def test_reasoning_kill_switch_disables_every_role(monkeypatch):
+    monkeypatch.setenv("LLM_REASONING", "0")
+    assert llm.reasoning_requested("pm") is False
+    assert llm.reasoning_requested("reviewer") is False
+
+
+def test_reasoning_roles_env_replaces_the_default_set(monkeypatch):
+    """An empty value means no role reasons; it must not fall back to default."""
+    monkeypatch.setenv("LLM_REASONING_ROLES", "")
+    assert llm.reasoning_requested("pm") is False
+
+    monkeypatch.setenv("LLM_REASONING_ROLES", "reviewer, triage")
+    assert llm.reasoning_requested("reviewer") is True
+    assert llm.reasoning_requested("triage") is True
+    assert llm.reasoning_requested("pm") is False
+
+
+def test_a_single_role_flag_adds_one_role_back(monkeypatch):
+    monkeypatch.setenv("LLM_REASONING_ROLES", "")
+    monkeypatch.setenv("LLM_REASONING_ROLE_REVIEWER", "1")
+    assert llm.reasoning_requested("reviewer") is True
+    assert llm.reasoning_requested("pm") is False
+
+
+def test_reasoning_effort_and_budget_are_env_tunable(monkeypatch):
+    assert llm.reasoning_effort("pm") == "medium"
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "high")
+    assert llm.reasoning_effort("pm") == "high"
+    monkeypatch.setenv("LLM_REASONING_EFFORT_REVIEWER", "low")
+    assert llm.reasoning_effort("reviewer") == "low"
+    monkeypatch.setenv("LLM_REASONING_EFFORT_PM", "nonsense")
+    assert llm.reasoning_effort("pm") == "medium", "an unknown effort must not reach the API"
+
+    assert llm.reasoning_budget("pm") == 1024
+    monkeypatch.setenv("LLM_REASONING_BUDGET", "2048")
+    assert llm.reasoning_budget("pm") == 2048
+    monkeypatch.setenv("LLM_REASONING_BUDGET", "not-a-number")
+    assert llm.reasoning_budget("pm") == 1024
+
+
+def test_reasoning_doubles_the_completion_ceiling(monkeypatch):
+    """Thinking is billed against the answer's budget, so 3000 is not enough."""
+    assert llm._reasoning_max_tokens(3000) == 6000
+    monkeypatch.setenv("LLM_REASONING_MAX_TOKENS", "16384")
+    assert llm._reasoning_max_tokens(3000) == 16384
+
+
+def test_inline_thinking_tags_are_pulled_out_of_the_answer():
+    raw = "<thinking>let me work it out</thinking>\n```yaml\nopenapi: 3.1.0\n```"
+    answer, thoughts = llm._strip_thinking(raw)
+    assert "work it out" not in answer
+    assert "openapi" in answer
+    assert "work it out" in thoughts
+    assert llm._strip_thinking("no thinking here") == ("no thinking here", "")
+
+
+def test_reasoning_body_is_shaped_per_provider_and_model():
+    """gpt-oss rejects reasoning_format; a plain instruct model rejects both."""
+    gpt_oss = llm._reasoning_body("groq", "openai/gpt-oss-20b", "developer")
+    assert gpt_oss == {"reasoning_effort": "medium", "include_reasoning": True}
+    assert "reasoning_format" not in gpt_oss, "mutually exclusive with include_reasoning"
+
+    qwen = llm._reasoning_body("groq", "qwen/qwen3.8-27b", "developer")
+    assert qwen["reasoning_format"] == "parsed"
+    assert "include_reasoning" not in qwen
+
+    assert llm._reasoning_body("groq", "llama-3.3-70b-versatile", "developer") is None
+    assert llm._reasoning_body("openrouter", "openai/gpt-oss-20b:free", "pm") == {
+        "reasoning": {"effort": "medium"}
+    }
+
+
+def test_out_of_range_effort_is_clamped_down_not_sent(monkeypatch):
+    """Anything but low/medium/high is a 400 from either Groq model family."""
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "xhigh")
+    body = llm._reasoning_body("groq", "openai/gpt-oss-120b", "developer")
+    assert body["reasoning_effort"] == "high"
+    assert llm._reasoning_body("groq", "qwen/qwen3.8-27b", "developer")[
+        "reasoning_effort"
+    ] == "high"
+
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "minimal")
+    # Below every allowed value: fall to the lowest one that exists.
+    assert llm._reasoning_body("groq", "qwen/qwen3.8-27b", "developer")[
+        "reasoning_effort"
+    ] == "low"
+
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "none")
+    # "none" means do not reason, so no effort key is sent at all.
+    assert "reasoning_effort" not in llm._reasoning_body(
+        "groq", "qwen/qwen3.8-27b", "developer"
+    )
+
+
+def test_openai_compat_returns_the_answer_and_captures_the_reasoning(monkeypatch):
+    monkeypatch.setattr(
+        llm,
+        "_post_json",
+        lambda *a, **k: {
+            "choices": [
+                {
+                    "message": {
+                        "content": "the answer",
+                        "reasoning": "step by step I decided",
+                    },
+                    "finish_reason": "stop",
+                }
+            ]
+        },
+    )
+    llm._LAST_REASONING.clear()
+    text = llm._openai_compat(
+        "https://api.groq.com/openai/v1/chat/completions",
+        "key",
+        "openai/gpt-oss-20b",
+        "p",
+        "s",
+        30,
+        reasoning_body={"include_reasoning": True},
+    )
+    assert text == "the answer"
+    assert llm._LAST_REASONING == ["step by step I decided"]
+
+
+def test_openai_compat_strips_raw_format_thinking_from_the_answer(monkeypatch):
+    """Groq's default `raw` format inlines <thinking> in the content."""
+    monkeypatch.setattr(
+        llm,
+        "_post_json",
+        lambda *a, **k: {
+            "choices": [
+                {
+                    "message": {"content": "<thinking>hmm</thinking>\nthe answer"},
+                    "finish_reason": "stop",
+                }
+            ]
+        },
+    )
+    llm._LAST_REASONING.clear()
+    text = llm._openai_compat(
+        "https://api.groq.com/openai/v1/chat/completions",
+        "key",
+        "qwen/qwen3.8-27b",
+        "p",
+        "s",
+        30,
+        reasoning_body={"reasoning_format": "raw"},
+    )
+    assert text == "\nthe answer"
+    assert llm._LAST_REASONING == ["<thinking>hmm</thinking>"]
+
+
+def test_reasoning_model_reports_why_the_content_came_back_empty(monkeypatch):
+    """A cap sized for the answer alone returns nothing but the reasoning."""
+    monkeypatch.setattr(
+        llm,
+        "_post_json",
+        lambda *a, **k: {
+            "choices": [
+                {"message": {"content": "", "reasoning": "spent it all"}, "finish_reason": "length"}
+            ]
+        },
+    )
+    llm._LAST_REASONING.clear()
+    llm._FAILURES.clear()
+    text = llm._openai_compat(
+        "https://api.groq.com/openai/v1/chat/completions",
+        "key",
+        "openai/gpt-oss-20b",
+        "p",
+        "s",
+        30,
+        reasoning_body={"include_reasoning": True},
+    )
+    assert text is None
+    assert not llm._LAST_REASONING, "a failed attempt must not leave its thinking behind"
+    assert any("reasoning consumed the budget" in f for f in llm._FAILURES)
+
+
+def test_gemini_thinking_parts_never_reach_the_answer():
+    out = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {"text": "summarised thought", "thought": True},
+                        {"text": "def f():\n    pass"},
+                    ]
+                }
+            }
+        ]
+    }
+    answer, thoughts = llm._gemini_parts(out)
+    assert answer == "def f():\n    pass"
+    assert thoughts == "summarised thought"
+    assert llm._gemini_text(out) == "def f():\n    pass"
+
+
+def test_gemini_sends_a_thinking_config_only_when_the_role_asks(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    monkeypatch.setenv("GEMINI_MODELS", "gemini-3-flash-preview")
+    llm._LAST_MODEL.clear()
+    llm._LAST_REASONING.clear()
+    seen = {}
+
+    def fake_post(url, payload, headers=None, timeout=60):
+        seen.update(payload["generationConfig"])
+        return {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+
+    monkeypatch.setattr(llm, "_post_json", fake_post)
+
+    # Reasoning off for this role: no thinkingConfig, untouched token ceiling.
+    monkeypatch.setenv("LLM_REASONING_ROLES", "reviewer")
+    assert llm._gemini("p", "s", 30, role="pm") == "ok"
+    assert "thinkingConfig" not in seen
+    assert seen["maxOutputTokens"] == 8192
+
+    # Reasoning on: thinkingConfig present and the ceiling grows by the budget.
+    monkeypatch.setenv("LLM_REASONING_ROLES", "pm")
+    monkeypatch.setenv("LLM_REASONING_BUDGET", "2048")
+    assert llm._gemini("p", "s", 30, role="pm") == "ok"
+    assert seen["thinkingConfig"] == {"includeThoughts": True, "thinkingBudget": 2048}
+    assert seen["maxOutputTokens"] == 8192 + 2048
+
+
+def test_generate_surfaces_reasoning_in_meta_and_log(monkeypatch):
+    monkeypatch.setenv("SKIP_OLLAMA", "1")
+    monkeypatch.setenv("AGENT_TEAM_TESTING", "1")
+    monkeypatch.setenv("PREFER_LOCAL_ONLY", "0")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    monkeypatch.setenv("GEMINI_MODELS", "gemini-3-flash-preview")
+    llm.CACHE.clear()
+
+    def fake_post(url, payload, headers=None, timeout=60):
+        return {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {"text": "a design", "thought": True},
+                            {"text": "the spec text"},
+                        ]
+                    }
+                }
+            ],
+            "usageMetadata": {"thoughtsTokenCount": 77},
+        }
+
+    monkeypatch.setattr(llm, "_post_json", fake_post)
+
+    text, meta = llm.generate("design this", role="designer")
+    assert text == "the spec text"
+    assert meta["reasoning"] == "a design"
+    assert meta["reasoning_tokens"] == 77
+
+
+def test_cached_call_reports_no_reasoning(monkeypatch):
+    monkeypatch.setenv("SKIP_OLLAMA", "1")
+    monkeypatch.setenv("AGENT_TEAM_TESTING", "1")
+    monkeypatch.setenv("PREFER_LOCAL_ONLY", "0")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    llm.CACHE.clear()
+    monkeypatch.setattr(
+        llm,
+        "_post_json",
+        lambda *a, **k: {"candidates": [{"content": {"parts": [{"text": "once"}]}}]},
+    )
+    _, first = llm.generate("cache reasoning", role="pm")
+    _, second = llm.generate("cache reasoning", role="pm")
+    assert second["cached"] is True
+    assert second["reasoning"] == ""
+    assert second["reasoning_tokens"] == 0
+    assert first["reasoning"] == ""

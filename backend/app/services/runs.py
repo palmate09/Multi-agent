@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import Settings, get_settings
-from graph.workflow import NODES, run_team
+from graph.workflow import NODES, reconstruct_state, run_team
 
 log = logging.getLogger("app.runs")
 
@@ -32,6 +32,17 @@ MAX_EVENTS = 500
 
 #: Run statuses that still hold a worker thread or pool slot.
 ACTIVE_STATUSES = ("queued", "running", "stopping")
+
+#: Terminal statuses a resume may continue from. Accepted runs have nothing
+#: to continue; active runs must be stopped (or restarted) first.
+RESUMABLE_STATUSES = (
+    "cancelled",
+    "unresolved",
+    "unresolved_review",
+    "failed",
+    "blocked",
+    "domain_missed",
+)
 
 
 class RunningError(RuntimeError):
@@ -53,6 +64,7 @@ class Run:
         self.requirement = requirement
         self.run_dir = run_dir
         self.options = options
+        self.resumed_from: str | None = options.get("resumed_from")
         self.status = "queued"
         self.created_at = _now()
         self.updated_at = self.created_at
@@ -107,6 +119,7 @@ class Run:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "error": self.error,
+            "resumed_from": self.resumed_from,
         }
         summary_file = self.run_dir / "summary.json"
         if summary_file.exists():
@@ -144,6 +157,7 @@ class Run:
             data["report"] = st.report.model_dump() if st.report else None
             data["coverage"] = st.coverage.model_dump() if st.coverage else None
             data["memory"] = list(st.memory)
+            data["plan"] = st.plan.model_dump() if st.plan else None
         else:
             data.update(self._artifacts_from_disk())
         return data
@@ -158,6 +172,7 @@ class Run:
             "report": None,
             "coverage": None,
             "memory": [],
+            "plan": None,
         }
         if not self.run_dir.exists():
             return out
@@ -192,6 +207,10 @@ class Run:
         if refl.exists():
             with contextlib.suppress(json.JSONDecodeError):
                 out["memory"] = json.loads(refl.read_text())
+        plan = self.run_dir / "reasoning.json"
+        if plan.exists():
+            with contextlib.suppress(json.JSONDecodeError):
+                out["plan"] = json.loads(plan.read_text())
         return out
 
     def list_artifacts(self) -> list[str]:
@@ -236,6 +255,10 @@ class RunStore:
             thread_name_prefix="run",
         )
         self._active = 0
+        # Reconstructed states waiting for their worker to pick them up
+        # (resume). Popped exactly once by _execute; never persisted because
+        # the artifacts they came from are the durable record.
+        self._resume_states: dict[str, Any] = {}
 
     # -- lifecycle ------------------------------------------------------
     def new_id(self, requested: str | None) -> str:
@@ -293,9 +316,12 @@ class RunStore:
 
     # -- execution ------------------------------------------------------
     def submit(self, run: Run) -> None:
+        # Slot reservation and worker handoff are atomic: stop() treats
+        # future-is-None as "no worker will ever run", which is only true
+        # when submit() has not executed at all.
         with self._lock:
             self._active += 1
-        run.future = self._pool.submit(self._execute, run)
+            run.future = self._pool.submit(self._execute, run)
 
     def stop(self, run_id: str) -> dict[str, Any] | None:
         """Request cancellation. Idempotent; safe on finished runs.
@@ -303,7 +329,8 @@ class RunStore:
         Returns ``{"stopped": True}`` when a live run was signalled,
         ``{"stopped": False, "status": ...}`` when there was nothing to stop,
         and None when the run does not exist. A queued run that has not
-        started is unqueued outright so it never occupies a worker.
+        started is unqueued outright so it never occupies a worker; a run
+        with no worker at all (stale entry) is settled directly.
         """
         with self._lock:
             run = self._runs.get(run_id)
@@ -314,34 +341,102 @@ class RunStore:
             run.status = "stopping"
             run.updated_at = _now()
             run.cancel_event.set()
-            future, finished = run.future, run._finished
-        if future is not None and not finished:
-            if future.cancel():
-                # Never started: release the slot submit() reserved, since
-                # _execute will never run its finally block.
+            future, finished, never_started = run.future, run._finished, run.future is None
+        if never_started or (future is not None and not finished and future.cancel()):
+            # No worker will run or finish this run, so settle it here.
+            # The slot is released only when submit() reserved one: a
+            # never-submitted run never held a slot.
+            if not never_started:
                 with self._lock:
                     self._active -= 1
-                run.status = "cancelled"
-                run.error = "stopped by user"
-                run.updated_at = _now()
-                run.emit("pipeline", "cancelled", {"detail": "stopped before start"})
-                run.mark_finished()
+            run.status = "cancelled"
+            run.error = "stopped by user"
+            run.updated_at = _now()
+            run.emit("pipeline", "cancelled", {"detail": "stopped before start"})
+            run.mark_finished()
         return {"run_id": run_id, "stopped": True, "status": run.status}
+
+    def restart(self, run_id: str, grace: float = 60.0) -> Run | None:
+        """Stop if active, delete all data, and start over.
+
+        The old run is removed entirely (directory + registry); the new run
+        carries the same requirement and options under a fresh id. Returns
+        the new Run, None when the id does not exist. Raises RunningError
+        when the worker does not exit within ``grace`` seconds — the old
+        data is left untouched in that case.
+        """
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                return None
+            requirement, options = run.requirement, dict(run.options)
+            active = run.status in ACTIVE_STATUSES
+        if active:
+            self.stop(run_id)
+            deadline = time.time() + grace
+            while time.time() < deadline:
+                with self._lock:
+                    fut, _done = run.future, run._finished
+                if fut is None or fut.done():
+                    break
+                time.sleep(0.5)
+            else:
+                raise RunningError(run_id, "stopping")
+        # Mint the fresh id BEFORE deleting: ids carry a second-resolution
+        # timestamp, so minting after the delete could hand back the same id
+        # when both runs fall in the same second. With the old entry still
+        # registered, a same-second collision earns a uuid suffix instead.
+        fresh_id = self.new_id(None)
+        self.delete(run_id)
+        new_run = self.create(requirement, run_id=fresh_id, **options)
+        self.submit(new_run)
+        return new_run
+
+    def resume(self, run_id: str) -> Run | None:
+        """Continue a settled run from its saved artifacts under a fresh id.
+
+        Nothing is deleted: the old run stays as history and the new run
+        records ``resumed_from``. Phases with artifacts are skipped (see
+        ``reconstruct_state``); retry budgets start fresh. Returns the new
+        Run, None when the id does not exist. Raises RunningError when the
+        run is still active or already accepted.
+        """
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                return None
+            if run.status in ACTIVE_STATUSES:
+                raise RunningError(run_id, run.status)
+            if run.status not in RESUMABLE_STATUSES:
+                raise RunningError(run_id, f"{run.status} (nothing to resume)")
+            requirement, options = run.requirement, dict(run.options)
+        state = reconstruct_state(run.run_dir)
+        state.requirement = requirement or state.requirement
+        fresh_id = self.new_id(None)
+        new_run = self.create(requirement, run_id=fresh_id, resumed_from=run_id, **options)
+        with self._lock:
+            self._resume_states[new_run.run_id] = state
+        self.submit(new_run)
+        return new_run
 
     def _execute(self, run: Run) -> None:
         run.status = "running"
         run.updated_at = _now()
         run.emit("pipeline", "start", {"run_id": run.run_id, "nodes": list(NODES)})
         try:
+            with self._lock:
+                resume_state = self._resume_states.pop(run.run_id, None)
             run.state = run_team(
                 run.requirement,
                 out_dir=str(run.run_dir),
                 use_docker=bool(run.options.get("use_docker", self.settings.sandbox_use_docker)),
                 skip_tester=bool(run.options.get("skip_tester")),
                 skip_reviewer=bool(run.options.get("skip_reviewer")),
+                skip_reasoner=bool(run.options.get("skip_reasoner")),
                 on_event=run.emit,
                 run_id=run.run_id,
                 cancel=run.cancel_event,
+                resume=resume_state,
             )
             run.status = run.state.status
         except Exception as exc:

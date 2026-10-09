@@ -47,6 +47,24 @@ def _bundle(body: str = LIBRARY_APP):
     return CodeBundle(files={"app.py": body}, entry_module="app", entry_attr="app")
 
 
+@pytest.fixture(autouse=True)
+def _stub_reasoner(monkeypatch):
+    """This module tests orchestration, so the advisory node is stubbed.
+
+    The reasoner would otherwise reach for a real backend, and
+    ``AGENT_TEAM_TESTING`` guarantees there is none. Its own behaviour lives in
+    ``test_agents.py``.
+    """
+    from agents import reasoner
+    from schemas.messages import Plan
+
+    monkeypatch.setattr(
+        reasoner,
+        "plan",
+        lambda requirement, stories=None: Plan(approach="stubbed plan"),
+    )
+
+
 LIBRARY = (
     "Build a REST API for a library that lends books. POST /loans to borrow an "
     "ISBN, GET /books, 404 on unknown ISBN."
@@ -56,7 +74,7 @@ LIBRARY = (
 def test_stub_lists_every_node():
     out = run_stub("outputs/stub_test")
     assert out["ok"] is True
-    assert len(out["nodes"]) == 8
+    assert len(out["nodes"]) == 9
 
 
 def test_all_agent_failures_block_the_run(no_llm, tmp_path):
@@ -100,12 +118,12 @@ def test_domain_missed_is_its_own_status(monkeypatch, tmp_path):
         "requirement_to_stories",
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
-    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="": _spec_for_library())
+    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library())
     # Correct, working code — for the wrong domain entirely.
     monkeypatch.setattr(
         developer,
         "spec_to_code",
-        lambda spec: CodeBundle(
+        lambda spec, plan=None: CodeBundle(
             files={
                 "app.py": (
                     "from fastapi import FastAPI\n"
@@ -139,11 +157,11 @@ def test_coverage_gate_runs_before_tests_are_graded(monkeypatch, tmp_path):
     )
     from agents import designer
 
-    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="": _spec_for_library())
+    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library())
     monkeypatch.setattr(
         developer,
         "spec_to_code",
-        lambda spec: CodeBundle(
+        lambda spec, plan=None: CodeBundle(
             files={"app.py": "app = FastAPI()\n"}, entry_module="app", entry_attr="app"
         ),
     )
@@ -167,8 +185,8 @@ def test_fix_loop_stops_when_patch_changes_nothing(monkeypatch, tmp_path):
         "requirement_to_stories",
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
-    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="": _spec_for_library())
-    monkeypatch.setattr(developer, "spec_to_code", lambda spec: _bundle())
+    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library())
+    monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
     monkeypatch.setattr(
         developer,
         "patch_code",
@@ -207,7 +225,7 @@ def test_fix_loop_reports_llm_outage_honestly(monkeypatch, tmp_path):
     from agents import designer, developer, pm, reviewer, tester
     from agents.llm import GenerationError
     from graph import workflow as Workflow
-    from schemas.messages import CodeBundle, UserStories
+    from schemas.messages import UserStories
 
     def _boom(*a, **k):
         raise GenerationError("str HTTP 429")
@@ -217,8 +235,8 @@ def test_fix_loop_reports_llm_outage_honestly(monkeypatch, tmp_path):
         "requirement_to_stories",
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
-    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="": _spec_for_library())
-    monkeypatch.setattr(developer, "spec_to_code", lambda spec: _bundle())
+    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library())
+    monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
     monkeypatch.setattr(developer, "patch_code", _boom)
     monkeypatch.setattr(reviewer, "generate", lambda *a, **k: ("", {"ok": False}))
     monkeypatch.setattr(
@@ -249,8 +267,8 @@ def test_fix_loop_applies_a_real_change(monkeypatch, tmp_path):
         "requirement_to_stories",
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
-    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="": _spec_for_library())
-    monkeypatch.setattr(developer, "spec_to_code", lambda spec: _bundle())
+    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library())
+    monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
     monkeypatch.setattr(
         developer,
         "patch_code",
@@ -297,11 +315,11 @@ def test_boot_failure_is_reported(monkeypatch, tmp_path):
         "requirement_to_stories",
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
-    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="": _spec_for_library())
+    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library())
     monkeypatch.setattr(
         developer,
         "spec_to_code",
-        lambda spec: _bundle("import nonexistent_module_xyz\n" + LIBRARY_APP),
+        lambda spec, plan=None: _bundle("import nonexistent_module_xyz\n" + LIBRARY_APP),
     )
     monkeypatch.setattr(
         Workflow.Runner,
@@ -358,8 +376,8 @@ def test_boot_failure_enters_the_fix_loop(monkeypatch, tmp_path):
         "requirement_to_stories",
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
-    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="": _spec_for_library())
-    monkeypatch.setattr(developer, "spec_to_code", lambda spec: _bundle())
+    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library())
+    monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
     monkeypatch.setattr(
         tester,
         "spec_to_tests",
@@ -409,8 +427,7 @@ def test_cancel_event_stops_run_between_nodes(monkeypatch, tmp_path):
     """A pre-set cancel event ends the run as cancelled after the first node."""
     import threading
 
-    from agents import designer, developer, pm, reviewer, tester
-    from graph import workflow as Workflow
+    from agents import designer, developer, pm, reviewer
     from schemas.messages import UserStories
 
     calls = []
@@ -425,7 +442,7 @@ def test_cancel_event_stops_run_between_nodes(monkeypatch, tmp_path):
         lambda *a, **k: calls.append("designer") or _spec_for_library(),
     )
     monkeypatch.setattr(
-        developer, "spec_to_code", lambda spec: calls.append("developer") or _bundle()
+        developer, "spec_to_code", lambda spec, plan=None: calls.append("developer") or _bundle()
     )
     monkeypatch.setattr(reviewer, "generate", lambda *a, **k: ("", {"ok": False}))
 
@@ -435,3 +452,216 @@ def test_cancel_event_stops_run_between_nodes(monkeypatch, tmp_path):
     assert st.status == "cancelled", st.status
     assert st.error == "stopped by user"
     assert "designer" not in calls, "no node after the first boundary may run"
+
+
+def test_reasoner_node_writes_its_artifact_and_hands_the_plan_on(monkeypatch, tmp_path):
+    """Plan-then-act: the plan reaches both consumers and lands on disk."""
+    from agents import designer, developer, pm, reasoner, reviewer, tester
+    from graph import workflow as Workflow
+    from schemas.messages import Plan, TestSuite, UserStories
+
+    monkeypatch.setattr(
+        pm,
+        "requirement_to_stories",
+        lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
+    )
+    plan = Plan(approach="key the schema on ISBN", risks=["borrowing the same ISBN twice"])
+    monkeypatch.setattr(reasoner, "plan", lambda requirement, stories=None: plan)
+
+    captured: dict = {}
+
+    def fake_designer(s, requirement="", plan=None):
+        captured["designer_plan"] = plan
+        return _spec_for_library()
+
+    def fake_developer(spec, plan=None):
+        captured["developer_plan"] = plan
+        return _bundle()
+
+    monkeypatch.setattr(designer, "stories_to_spec", fake_designer)
+    monkeypatch.setattr(developer, "spec_to_code", fake_developer)
+    monkeypatch.setattr(
+        tester,
+        "spec_to_tests",
+        lambda *a, **k: TestSuite(
+            files={
+                "test_app.py": (
+                    "import app\nfrom fastapi.testclient import TestClient\n"
+                    "def test_h():\n    assert TestClient(app.app).get('/health').status_code == 200\n"
+                )
+            }
+        ),
+    )
+    monkeypatch.setattr(reviewer, "generate", lambda *a, **k: ("", {"ok": False}))
+    monkeypatch.setattr(Workflow.Runner, "static_analysis", lambda *a, **k: ("", ""))
+    monkeypatch.setattr(
+        Workflow.Runner,
+        "run_tests",
+        lambda *a, **k: TestReport(passed=1, failed=0, failures=[], raw=""),
+    )
+
+    events = []
+    out = tmp_path / "planned"
+    st = run_team(LIBRARY, out_dir=str(out), on_event=lambda n, p, d: events.append((n, p, d)))
+
+    assert st.status == "accepted", st.error
+    assert st.plan is not None and st.plan.approach.startswith("key the schema")
+    written = out / "reasoning.json"
+    assert written.exists(), "the plan is a run artifact for the human, not just prompt text"
+    assert "ISBN" in written.read_text()
+    assert captured["designer_plan"] is plan, "the Designer never saw the plan"
+    assert captured["developer_plan"] is plan, "the Developer never saw the plan"
+
+    done = [d for n, p, d in events if n == "reasoner" and p == "done"]
+    assert done and done[0]["risks"] == 1
+    assert done[0]["structured"] is True
+
+
+def test_skip_reasoner_ablates_the_node(monkeypatch, tmp_path):
+    """Ablation must skip the call entirely, not just discard its result."""
+    from agents import designer, developer, pm, reasoner, reviewer, tester
+    from graph import workflow as Workflow
+    from schemas.messages import TestSuite, UserStories
+
+    monkeypatch.setattr(
+        pm,
+        "requirement_to_stories",
+        lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
+    )
+
+    def must_not_plan(*a, **k):
+        raise AssertionError("the reasoner ran despite skip_reasoner")
+
+    monkeypatch.setattr(reasoner, "plan", must_not_plan)
+
+    captured: dict = {}
+
+    def fake_designer(s, requirement="", plan=None):
+        captured["plan"] = plan
+        return _spec_for_library()
+
+    monkeypatch.setattr(designer, "stories_to_spec", fake_designer)
+    monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
+    monkeypatch.setattr(
+        tester,
+        "spec_to_tests",
+        lambda *a, **k: TestSuite(
+            files={
+                "test_app.py": (
+                    "import app\nfrom fastapi.testclient import TestClient\n"
+                    "def test_h():\n    assert TestClient(app.app).get('/health').status_code == 200\n"
+                )
+            }
+        ),
+    )
+    monkeypatch.setattr(reviewer, "generate", lambda *a, **k: ("", {"ok": False}))
+    monkeypatch.setattr(Workflow.Runner, "static_analysis", lambda *a, **k: ("", ""))
+    monkeypatch.setattr(
+        Workflow.Runner,
+        "run_tests",
+        lambda *a, **k: TestReport(passed=1, failed=0, failures=[], raw=""),
+    )
+
+    events = []
+    out = tmp_path / "unplanned"
+    st = run_team(
+        LIBRARY, out_dir=str(out), skip_reasoner=True, on_event=lambda n, p, d: events.append((n, p, d))
+    )
+
+    assert st.status == "accepted", st.error
+    assert st.plan is None
+    assert captured["plan"] is None
+    assert not (out / "reasoning.json").exists()
+    done = [d for n, p, d in events if n == "reasoner" and p == "done"]
+    assert done and done[0].get("ablated") is True
+
+
+def _write_resume_fixture(root, stories_json, spec_yaml, plan, code_body, test_body=None):
+    """A previous run's directory stopped mid-flight: everything up to tests."""
+    import json as _json
+
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "code").mkdir(parents=True, exist_ok=True)
+    (root / "stories.json").write_text(stories_json)
+    (root / "spec.yaml").write_text(spec_yaml)
+    (root / "plan.json").write_text(_json.dumps(plan))
+    (root / "code" / "app.py").write_text(code_body)
+    if test_body is not None:
+        (root / "tests").mkdir(parents=True, exist_ok=True)
+        (root / "tests" / "test_app.py").write_text(test_body)
+
+
+def test_reconstruct_state_reads_partial_artifacts(tmp_path):
+    """Cancelled-anywhere artifacts rebuild a runnable state, never raise."""
+    from graph.workflow import reconstruct_state
+    from schemas.messages import UserStories
+
+    stories = UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}])
+    prev = tmp_path / "prev"
+    _write_resume_fixture(
+        prev,
+        stories.model_dump_json(),
+        _spec_for_library().openapi_yaml,
+        {"kind": "api", "entrypoint": "app.py", "files": ["app.py"],
+         "public_api": [], "contract_text": ""},
+        LIBRARY_APP,
+        "import app\n\n\ndef test_x():\n    assert True\n",
+    )
+    st = reconstruct_state(prev)
+    assert st.stories is not None and len(st.stories.stories) == 1
+    assert st.spec is not None and st.spec.entrypoint == "app.py"
+    assert st.code is not None and st.code.entry_module == "app"
+    assert st.code.entry_attr == "app"
+    assert st.tests is not None and "test_app.py" in st.tests.files
+    # Empty directory reconstructs to an empty state (resume == restart).
+    assert reconstruct_state(tmp_path / "missing").stories is None
+
+
+def test_resume_skips_phases_with_artifacts(monkeypatch, tmp_path):
+    """Regeneration must not run for phases the previous run completed."""
+    from agents import designer, developer, pm, reviewer, tester
+    from graph import workflow as Workflow
+    from graph.workflow import run_team
+    from schemas.messages import TestReport, UserStories
+
+    def must_not_run(name):
+        def _boom(*a, **k):
+            raise AssertionError(f"{name} ran despite restored artifacts")
+
+        return _boom
+
+    stories = UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}])
+    monkeypatch.setattr(pm, "requirement_to_stories", must_not_run("pm"))
+    monkeypatch.setattr(designer, "stories_to_spec", must_not_run("designer"))
+    monkeypatch.setattr(developer, "spec_to_code", must_not_run("developer"))
+    monkeypatch.setattr(tester, "spec_to_tests", must_not_run("tester"))
+    monkeypatch.setattr(reviewer, "generate", lambda *a, **k: ("", {"ok": False}))
+    monkeypatch.setattr(Workflow.Runner, "boot_check", lambda *a, **k: (True, "ok"))
+    monkeypatch.setattr(Workflow.Runner, "static_analysis", lambda *a, **k: ("", ""))
+    monkeypatch.setattr(
+        Workflow.Runner,
+        "run_tests",
+        lambda *a, **k: TestReport(passed=1, failed=0, failures=[], raw=""),
+    )
+
+    prev = tmp_path / "prev"
+    _write_resume_fixture(
+        prev,
+        stories.model_dump_json(),
+        _spec_for_library().openapi_yaml,
+        {"kind": "api", "entrypoint": "app.py", "files": ["app.py"],
+         "public_api": [], "contract_text": ""},
+        LIBRARY_APP,
+        "import app\n\n\ndef test_x():\n    assert True\n",
+    )
+    from graph.workflow import reconstruct_state
+
+    events = []
+    st = run_team(
+        LIBRARY,
+        out_dir=str(tmp_path / "resumed"),
+        resume=reconstruct_state(prev),
+        on_event=lambda n, p, d=None: events.append((n, p)),
+    )
+    assert st.status == "accepted", (st.status, st.error)
+    assert ("pipeline", "resumed") in events

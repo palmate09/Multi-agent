@@ -21,9 +21,10 @@ import re
 
 from agents.coverage import domain_terms
 from agents.introspect import spec_paths
-from agents.llm import GenerationError, require
 from agents.kind import detect_kind, kind_hint
-from schemas.messages import ApiSpec, UserStories
+from agents.llm import GenerationError, require
+from agents.reasoner import plan_block
+from schemas.messages import ApiSpec, Plan, UserStories
 
 SMALL_APP_ENDPOINTS = 4
 
@@ -131,13 +132,13 @@ def _parse_api_plan(text: str, endpoints: list[str]) -> tuple[str, list[str]]:
     return entry, _plan_files(entry, len(endpoints))
 
 
-def _design_api(stories: UserStories, requirement: str) -> ApiSpec:
+def _design_api(stories: UserStories, requirement: str, plan: Plan | None = None) -> ApiSpec:
     listing = "\n".join(f"- {s.id}: {s.title} ({'; '.join(s.acceptance)})" for s in stories.stories)
     prompt = (
         f"Requirement:\n{requirement}\n\nStories:\n{listing}\n"
         if requirement
         else f"Stories:\n{listing}\n"
-    )
+    ) + plan_block(plan)
     errors: list[str] = []
     for _ in range(3):
         text, _meta = require(
@@ -187,13 +188,13 @@ def _valid_program(data: dict) -> tuple[bool, str]:
     return True, ""
 
 
-def _design_program(stories: UserStories, requirement: str) -> ApiSpec:
+def _design_program(stories: UserStories, requirement: str, plan: Plan | None = None) -> ApiSpec:
     listing = "\n".join(f"- {s.title}: {'; '.join(s.acceptance)}" for s in stories.stories)
     prompt = (
         f"Requirement:\n{requirement}\n\nExpected behaviours:\n{listing}\n"
         if requirement
         else f"Expected behaviours:\n{listing}\n"
-    )
+    ) + plan_block(plan)
     errors: list[str] = []
     for _ in range(3):
         text, _meta = require(
@@ -232,16 +233,24 @@ def _design_program(stories: UserStories, requirement: str) -> ApiSpec:
     )
 
 
-def stories_to_spec(stories: UserStories, requirement: str = "") -> ApiSpec:
+def stories_to_spec(
+    stories: UserStories, requirement: str = "", plan: Plan | None = None
+) -> ApiSpec:
     """Design the contract for this requirement.
 
     Raises :class:`agents.llm.GenerationError` rather than falling back to a
     built-in answer, which is what once let a library request be reported as a
     successfully generated task manager.
+
+    ``plan`` is the Reasoner's read on the requirement. It is passed through as
+    context only — the contract is still graded against the requirement, not
+    against the plan.
     """
     kind = detect_kind(requirement)
-    spec = _design_api(stories, requirement) if kind == "api" else _design_program(
-        stories, requirement
+    spec = (
+        _design_api(stories, requirement, plan)
+        if kind == "api"
+        else _design_program(stories, requirement, plan)
     )
     # One line the workflow logs, so a misclassification is visible immediately.
     spec.contract_text = spec.contract_text or ""

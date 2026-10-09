@@ -51,12 +51,12 @@ def no_llm(monkeypatch):
     Used to assert the pipeline *blocks* rather than silently producing a
     fallback answer, which is the regression this suite exists for.
     """
-    from agents import designer, developer, llm, pm, reviewer, tester
+    from agents import designer, developer, llm, pm, reasoner, reviewer, tester
 
     def boom(*a, **k):
         raise llm.GenerationError("stubbed: no backend available")
 
-    for mod in (pm, designer, developer, tester):
+    for mod in (pm, reasoner, designer, developer, tester):
         monkeypatch.setattr(mod, "require", boom)
     monkeypatch.setattr(reviewer, "generate", lambda *a, **k: ("", {"ok": False}))
 

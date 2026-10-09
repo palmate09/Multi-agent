@@ -97,6 +97,7 @@ export const api = {
     requirement: string;
     skip_tester?: boolean;
     skip_reviewer?: boolean;
+    skip_reasoner?: boolean;
   }) =>
     request<RunSummary>("/api/runs", {
       method: "POST",
@@ -111,6 +112,18 @@ export const api = {
       `/api/runs/${runId}/stop`,
       { method: "POST", body: JSON.stringify({}) }
     ),
+
+  restartRun: (runId: string) =>
+    request<RunSummary>(`/api/runs/${runId}/restart`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+
+  resumeRun: (runId: string) =>
+    request<RunSummary>(`/api/runs/${runId}/resume`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
 
   evals: () => request<EvalResults>("/api/evals/results"),
 };

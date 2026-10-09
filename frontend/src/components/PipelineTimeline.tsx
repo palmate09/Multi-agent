@@ -17,6 +17,20 @@ function describe(event: PipelineEvent): string {
       }
       break;
     case "done":
+      if (event.node === "reasoner") {
+        // The plan node: either it wrote a plan, or it was ablated on purpose.
+        if (d.ablated === true) {
+          bits.push("ablated, no plan");
+        } else {
+          if (typeof d.risks === "number") bits.push(`${d.risks} risks`);
+          if (typeof d.edge_cases === "number") bits.push(`${d.edge_cases} edge cases`);
+          if (typeof d.open_questions === "number") {
+            bits.push(`${d.open_questions} open questions`);
+          }
+          if (d.structured === false) bits.push("prose, not parsed");
+        }
+        break;
+      }
       if (typeof d.stories === "number") bits.push(`${d.stories} stories`);
       if (typeof d.endpoints === "number") bits.push(`${d.endpoints} endpoints`);
       if (Array.isArray(d.files)) bits.push(`${d.files.length} files`);

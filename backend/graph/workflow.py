@@ -1,4 +1,4 @@
-"""Orchestration: pm -> designer -> developer -> tester -> runner -> triage -> reviewer.
+"""Orchestration: pm -> reasoner -> designer -> developer -> tester -> runner -> triage -> reviewer.
 
 Sequential by design: the Tester's independence comes from never seeing the
 code, not from running at the same time, and the small local models gain
@@ -29,15 +29,36 @@ from agents import designer as Designer
 from agents import developer as Developer
 from agents import llm
 from agents import pm as PM
+from agents import reasoner as Reasoner
 from agents import reviewer as Reviewer
 from agents import tester as Tester
 from agents.coverage import check as coverage_check
-from agents.introspect import all_routes, spec_paths
+from agents.introspect import all_routes, find_app_object, spec_paths
 from agents.llm import GenerationError
 from sandbox import runner as Runner
-from schemas.messages import CoverageReport, TestFailure, TestReport, TestSuite
+from schemas.messages import (
+    ApiSpec,
+    CodeBundle,
+    CoverageReport,
+    GraphState,
+    Plan,
+    TestFailure,
+    TestReport,
+    TestSuite,
+    UserStories,
+)
 
-NODES = ("pm", "designer", "developer", "tester", "runner", "triage", "reviewer", "final")
+NODES = (
+    "pm",
+    "reasoner",
+    "designer",
+    "developer",
+    "tester",
+    "runner",
+    "triage",
+    "reviewer",
+    "final",
+)
 
 DEFAULT_MAX_DEV = 4
 
@@ -52,6 +73,102 @@ def _write_code(out: Path, code) -> None:
         p = out / "code" / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
+
+
+def reconstruct_state(run_dir: str | Path) -> GraphState:
+    """Rebuild pipeline state from a previous run's saved artifacts.
+
+    Every artifact is optional: a cancelled run may have stopped anywhere, so
+    a missing file simply leaves that phase (and everything after it) to be
+    re-executed. Never raises on malformed files — they are treated as absent.
+    Always returns a state, possibly empty (resume then behaves as restart).
+    """
+    root = Path(run_dir)
+    st = GraphState()
+
+    def _json(name: str):
+        try:
+            return json.loads((root / name).read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    stories = _json("stories.json")
+    if isinstance(stories, dict):
+        with contextlib.suppress(Exception):
+            st.stories = UserStories.model_validate(stories)
+
+    reasoning = _json("reasoning.json")
+    if isinstance(reasoning, dict):
+        with contextlib.suppress(Exception):
+            st.plan = Plan.model_validate(reasoning)
+
+    spec_text = None
+    try:
+        spec_text = (root / "spec.yaml").read_text()
+    except OSError:
+        spec_text = None
+    plan_meta = _json("plan.json") or {}
+    if spec_text:
+        with contextlib.suppress(Exception):
+            st.spec = ApiSpec(
+                openapi_yaml=spec_text,
+                kind=plan_meta.get("kind", "api"),
+                entrypoint=plan_meta.get("entrypoint", "main.py"),
+                files=plan_meta.get("files", []),
+                public_api=plan_meta.get("public_api", []),
+                contract_text=plan_meta.get("contract_text", ""),
+            )
+
+    code_files: dict[str, str] = {}
+    code_root = root / "code"
+    if code_root.is_dir():
+        for p in sorted(code_root.rglob("*")):
+            if p.is_file():
+                try:
+                    code_files[str(p.relative_to(code_root))] = p.read_text()
+                except OSError:
+                    continue
+    if code_files:
+        module = (plan_meta.get("entrypoint", "main.py") or "main.py").replace(".py", "")
+        entry_module, entry_attr = module, ""
+        try:
+            found = find_app_object(code_files)
+        except Exception:
+            found = None
+        if found:
+            entry_module, entry_attr = found
+        elif (st.spec.kind if st.spec else "api") == "api":
+            entry_attr = "app"
+        with contextlib.suppress(Exception):
+            st.code = CodeBundle(files=code_files, entry_module=entry_module, entry_attr=entry_attr)
+
+    test_files: dict[str, str] = {}
+    tests_root = root / "tests"
+    if tests_root.is_dir():
+        for p in sorted(tests_root.rglob("*")):
+            if p.is_file() and p.suffix == ".py":
+                try:
+                    test_files[str(p.relative_to(tests_root))] = p.read_text()
+                except OSError:
+                    continue
+    if test_files:
+        st.tests = TestSuite(files=test_files)
+
+    reports = sorted(root.glob("report_try*.json"))
+    if reports:
+        with contextlib.suppress(Exception):
+            st.report = TestReport.model_validate(json.loads(reports[-1].read_text()))
+
+    coverage = _json("coverage.json")
+    if isinstance(coverage, dict):
+        with contextlib.suppress(Exception):
+            st.coverage = CoverageReport.model_validate(coverage)
+
+    memory = _json("reflections.json")
+    if isinstance(memory, list):
+        st.memory = [str(m) for m in memory]
+
+    return st
 
 
 def _self_checks(spec) -> str:
@@ -122,10 +239,12 @@ def run_team(
     use_docker: bool = False,
     skip_tester: bool = False,
     skip_reviewer: bool = False,
+    skip_reasoner: bool = False,
     verbose: bool = False,
     on_event: Callable[[str, str, dict], None] | None = None,
     run_id: str | None = None,
     cancel: threading.Event | None = None,
+    resume: GraphState | None = None,
 ) -> object:
     """Execute the full pipeline, streaming progress through ``on_event``.
 
@@ -136,12 +255,29 @@ def run_team(
     honoured at node boundaries, so stopping latency is bounded by one agent
     call or one sandbox run, never instant mid-call. A cancelled run ends with
     ``status="cancelled"``.
-    """
-    from schemas.messages import GraphState
 
+    ``resume`` continues a previous run from its saved artifacts (see
+    ``reconstruct_state``): phases with artifacts are skipped, the coverage
+    gate and boot check always re-run, retry budgets start fresh.
+    """
     out = Path(out_dir)
     t0 = time.time()
     st = GraphState(requirement=requirement, run_id=run_id or out.name)
+    if resume is not None:
+        # Adopt the reconstructed state under the new run's identity. Budgets
+        # restart: the resumed run gets full dev/test/review retries, since it
+        # may be continuing from a budget the old run exhausted.
+        st = resume
+        st.run_id = run_id or out.name
+        st.status = "pending"
+        st.error = ""
+        st.retry_dev = 0
+        st.retry_test = 0
+        st.retry_review = 0
+        if skip_reasoner:
+            # Ablation wins over restored artifacts: a resumed ablated run
+            # must behave like a fresh ablated run (designer gets no plan).
+            st.plan = None
     # Scope LLM responses to this run so a later run with the same requirement
     # never inherits this run's completions from the shared backend cache.
     llm.set_run_scope(str(run_id or out.name))
@@ -179,60 +315,109 @@ def run_team(
         _finish(out, st, t0, emit)
 
     try:
-        emit("pm", "start", {"requirement": requirement})
-        st.stories = PM.requirement_to_stories(requirement)
-        _save(out, "stories.json", st.stories.model_dump_json(indent=2))
-        emit(
-            "pm",
-            "done",
-            {
-                "stories": len(st.stories.stories),
-                "clarifying_question": st.stories.clarifying_question,
-            },
-        )
-        if cancelled_now():
-            return finish_cancelled()
-
-        emit("designer", "start")
-        st.spec = Designer.stories_to_spec(st.stories, requirement=requirement)
-        _save(out, "spec.yaml", st.spec.openapi_yaml)
-        _save(
-            out,
-            "plan.json",
-            json.dumps(
+        if resume is not None:
+            skipped = sorted(
+                name
+                for name, present in (
+                    ("pm", st.stories is not None),
+                    ("reasoner", st.plan is not None),
+                    ("designer", st.spec is not None),
+                    ("developer", st.code is not None),
+                    ("tester", st.tests is not None),
+                )
+                if present
+            )
+            emit(
+                "pipeline",
+                "resumed",
+                {"detail": f"resuming with {len(skipped)} phases skipped", "skipped": skipped},
+            )
+        if st.stories is None:
+            emit("pm", "start", {"requirement": requirement})
+            st.stories = PM.requirement_to_stories(requirement)
+            _save(out, "stories.json", st.stories.model_dump_json(indent=2))
+            emit(
+                "pm",
+                "done",
                 {
-                    "kind": st.spec.kind,
-                    "entrypoint": st.spec.entrypoint,
-                    "files": st.spec.files,
-                    "public_api": st.spec.public_api,
-                    "contract_text": st.spec.contract_text,
+                    "stories": len(st.stories.stories),
+                    "clarifying_question": st.stories.clarifying_question,
                 },
-                indent=2,
-            ),
-        )
-        emit(
-            "designer",
-            "done",
-            {
-                "endpoints": len(st.spec.endpoints),
-                "files": st.spec.files,
-                "entrypoint": st.spec.entrypoint,
-            },
-        )
+            )
         if cancelled_now():
             return finish_cancelled()
 
-        emit("developer", "start")
-        st.code = Developer.spec_to_code(st.spec)
-        _write_code(out, st.code)
-        emit(
-            "developer",
-            "done",
-            {
-                "files": sorted(st.code.files),
-                "entrypoint": f"{st.code.entry_module}.{st.code.entry_attr}",
-            },
-        )
+        # Plan-then-act: the Reasoner works the requirement out before a spec
+        # exists, so a misread costs one advisory node instead of a contract, a
+        # codebase and a test suite. Ablating it (skip_reasoner) restores the
+        # old straight-to-design behaviour for comparison. A resumed run with a
+        # restored plan skips straight to design.
+        if st.plan is None:
+            emit("reasoner", "start")
+            if skip_reasoner:
+                log("reasoner ablated: the designer gets no plan")
+                emit("reasoner", "done", {"ablated": True})
+            else:
+                st.plan = Reasoner.plan(requirement, stories=st.stories)
+                _save(out, "reasoning.json", st.plan.model_dump_json(indent=2))
+                emit(
+                    "reasoner",
+                    "done",
+                    {
+                        "approach": (st.plan.approach or "")[:240],
+                        "risks": len(st.plan.risks),
+                        "edge_cases": len(st.plan.edge_cases),
+                        "open_questions": len(st.plan.open_questions),
+                        "structured": st.plan.structured,
+                    },
+                )
+        if cancelled_now():
+            return finish_cancelled()
+
+        if st.spec is None:
+            emit("designer", "start")
+            st.spec = Designer.stories_to_spec(
+                st.stories, requirement=requirement, plan=st.plan
+            )
+            _save(out, "spec.yaml", st.spec.openapi_yaml)
+            _save(
+                out,
+                "plan.json",
+                json.dumps(
+                    {
+                        "kind": st.spec.kind,
+                        "entrypoint": st.spec.entrypoint,
+                        "files": st.spec.files,
+                        "public_api": st.spec.public_api,
+                        "contract_text": st.spec.contract_text,
+                    },
+                    indent=2,
+                ),
+            )
+            emit(
+                "designer",
+                "done",
+                {
+                    "endpoints": len(st.spec.endpoints),
+                    "files": st.spec.files,
+                    "entrypoint": st.spec.entrypoint,
+                },
+            )
+        if cancelled_now():
+            return finish_cancelled()
+
+        if st.code is None:
+            emit("developer", "start")
+            st.code = Developer.spec_to_code(st.spec, plan=st.plan)
+            _write_code(out, st.code)
+            emit(
+                "developer",
+                "done",
+                {
+                    "files": sorted(st.code.files),
+                    "entrypoint": f"{st.code.entry_module}.{st.code.entry_attr}",
+                },
+            )
         if cancelled_now():
             return finish_cancelled()
 
@@ -359,7 +544,7 @@ def run_team(
             log("tester ablated: developer-authored checks only")
             st.tests = TestSuite(files={"test_generated.py": _self_checks(st.spec)})
             emit("tester", "done", {"ablated": True, "files": ["test_generated.py"]})
-        else:
+        elif st.tests is None:
             emit("tester", "start")
             st.tests = Tester.spec_to_tests(
                 st.spec,

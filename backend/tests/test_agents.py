@@ -612,3 +612,119 @@ def test_cloud_order_supports_provider_chains(monkeypatch):
     assert [name for _, name in llm.cloud_order()] == ["gemini"]
     monkeypatch.setenv("LLM_PROVIDER", "bogus")
     assert len(llm.cloud_order()) > 2, "unknown name falls back to auto"
+
+
+# --------------------------------------------------------------- reasoner ---
+PLAN_REPLY = """Working it through first:
+```json
+{"approach": "Model each loan as a row keyed by ISBN, with a unique index.",
+ "decisions": ["SQLite through SQLAlchemy", "404 for an unknown ISBN"],
+ "risks": ["borrowing twice for the same ISBN"],
+ "edge_cases": ["blank ISBN"],
+ "open_questions": ["is a due date required?"]}
+```
+"""
+
+
+def _reasoner(monkeypatch, reply=PLAN_REPLY, calls=None):
+    from agents import reasoner
+
+    def fake(prompt, system, role=None, **kw):
+        if calls is not None:
+            calls.append({"role": role, "prompt": prompt})
+        return reply, {"ok": True}
+
+    monkeypatch.setattr(reasoner, "require", fake)
+    return reasoner
+
+
+def test_reasoner_parses_the_block_under_its_own_role(monkeypatch):
+    calls = []
+    reasoner = _reasoner(monkeypatch, calls=calls)
+    p = reasoner.plan("Build a REST API for a library that lends books", stories=_stories())
+    assert p.structured is True
+    assert p.approach.startswith("Model each loan")
+    assert p.decisions == ["SQLite through SQLAlchemy", "404 for an unknown ISBN"]
+    assert p.risks == ["borrowing twice for the same ISBN"]
+    assert p.edge_cases == ["blank ISBN"]
+    assert p.open_questions == ["is a due date required?"]
+    assert calls[0]["role"] == "reasoner"
+    assert "US1" in calls[0]["prompt"], "the plan is made with the stories in view"
+
+
+def test_reasoner_keeps_prose_when_the_block_never_parses(monkeypatch):
+    """The node is advisory: three prose replies must not fail the run."""
+    calls = []
+    reply = "I would key the schema on ISBN and index it, then return 404."
+    reasoner = _reasoner(monkeypatch, reply=reply, calls=calls)
+    p = reasoner.plan("Build a REST API for a library")
+    assert p.structured is False
+    assert "ISBN" in p.approach
+    assert len(calls) == 3, "the structured attempt is retried before degrading"
+
+
+def test_reasoner_still_blocks_when_nothing_can_be_generated(monkeypatch):
+    """No template: a backend that never answers raises like every other node."""
+    from agents import reasoner
+
+    def boom(*a, **k):
+        raise llm.GenerationError("stubbed: no backend available")
+
+    monkeypatch.setattr(reasoner, "require", boom)
+    with pytest.raises(llm.GenerationError):
+        reasoner.plan("Build a REST API for a library")
+
+
+def test_plan_block_is_labelled_advisory_and_covers_every_section():
+    from agents import reasoner
+    from schemas.messages import Plan
+
+    text = reasoner.plan_block(
+        Plan(approach="key on ISBN", decisions=["d1"], risks=["r1"], edge_cases=["e1"])
+    )
+    assert "advisory" in text
+    for expected in ("key on ISBN", "Decisions", "- d1", "Risks", "- r1", "Edge cases", "- e1"):
+        assert expected in text, expected
+
+    assert reasoner.plan_block(None) == ""
+    assert reasoner.plan_block(Plan()) == "", "an empty plan must not pad the prompt"
+
+
+def test_designer_is_told_the_plan_but_not_bound_by_it(monkeypatch):
+    from schemas.messages import Plan
+
+    seen = {}
+    reply = "```yaml\nopenapi: 3.1.0\ninfo: {title: L, version: 1.0.0}\npaths:\n  /loans:\n    post:\n      responses: {'201': {description: ok}}\n```"
+
+    def fake(prompt, system, role=None, **kw):
+        seen["prompt"] = prompt
+        return reply, {"ok": True}
+
+    monkeypatch.setattr(designer, "require", fake)
+    designer.stories_to_spec(
+        _stories(),
+        requirement="Build a REST API for a library that lends books",
+        plan=Plan(approach="key the schema on ISBN"),
+    )
+    assert "key the schema on ISBN" in seen["prompt"]
+    assert "advisory" in seen["prompt"]
+
+
+def test_developer_is_told_the_plan(monkeypatch):
+    from schemas.messages import Plan
+
+    seen = {}
+
+    def fake(prompt, system, role=None, **kw):
+        seen["prompt"] = prompt
+        return APP_REPLY, {"ok": True}
+
+    monkeypatch.setattr(developer, "require", fake)
+    spec = ApiSpec(openapi_yaml="openapi: 3.1.0", entrypoint="app.py", files=["app.py"])
+    developer.spec_to_code(spec, plan=Plan(approach="keep the ISBN index unique"))
+    assert "keep the ISBN index unique" in seen["prompt"]
+
+    # Without a plan the prompt is unchanged in substance: no empty section.
+    seen.clear()
+    developer.spec_to_code(spec)
+    assert "advisory" not in seen["prompt"]

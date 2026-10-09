@@ -22,6 +22,9 @@ class RunCreate(BaseModel):
     requirement: str = Field(min_length=1, max_length=8000)
     skip_tester: bool = False
     skip_reviewer: bool = False
+    # Ablate the plan-then-act node, for comparing a run against the old
+    # straight-to-design behaviour.
+    skip_reasoner: bool = False
     use_docker: bool | None = None
     run_id: str | None = Field(default=None, max_length=64)
 
@@ -43,12 +46,18 @@ class RunSummary(BaseModel):
     entrypoint: str | None = None
     files: list[str] = []
     error: str | None = None
+    # Set when this run continues a previous one (resume): the old run id.
+    # The old run is kept as history; nothing is deleted by resuming.
+    resumed_from: str | None = None
 
 
 class RunDetail(RunSummary):
     events: list[dict[str, Any]] = Field(default_factory=list)
     artifacts: list[str] = Field(default_factory=list)
     stories: dict[str, Any] | None = None
+    # Plan from the Reasoner node (approach/decisions/risks/edge cases/open
+    # questions). Null when the node was ablated or has not run; advisory only.
+    plan: dict[str, Any] | None = None
     spec: str | None = None
     code: dict[str, str] = Field(default_factory=dict)
     tests: dict[str, str] = Field(default_factory=dict)

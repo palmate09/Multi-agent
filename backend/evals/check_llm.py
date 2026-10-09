@@ -25,7 +25,7 @@ try:
 except Exception:
     pass
 
-from agents.llm import generate, role_model, role_num_predict
+from agents.llm import generate, reasoning_requested, role_model, role_num_predict
 
 
 def probe_ollama() -> tuple[bool, list[str]]:
@@ -50,11 +50,24 @@ def main() -> int:
     for m in models:
         print(f"  pulled: {m}")
     print("role models:")
-    for role in ("pm", "designer", "developer", "tester", "reviewer"):
+    for role in ("pm", "designer", "developer", "tester", "reviewer", "reasoner"):
         model = role_model(role)
         present = any(m == model or m.split(":")[0] == model.split(":")[0] for m in models)
         flag = "ok" if present else "MISSING"
         print(f"  {role:10s} {model:32s} num_predict={role_num_predict(role):5d}  [{flag}]")
+
+    all_roles = (
+        "pm",
+        "designer",
+        "developer",
+        "tester",
+        "reviewer",
+        "reasoner",
+        "triage",
+        "reflection",
+    )
+    thinking = [r for r in all_roles if reasoning_requested(r)]
+    print(f"reasoning roles: {', '.join(thinking) or '(none)'}")
 
     from agents.llm import cloud_order
 
@@ -145,6 +158,11 @@ def _smoke() -> int:
             print(f"  - {e}")
         return 1
     print(f"response: {text.strip()[:80]}")
+    if meta.get("reasoning"):
+        print(
+            f"reasoning: {len(meta['reasoning'])} chars"
+            f" ({meta.get('reasoning_tokens', 0)} tokens reported)"
+        )
     return 0
 
 

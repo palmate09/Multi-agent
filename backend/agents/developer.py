@@ -15,7 +15,8 @@ import re
 from agents.blocks import parse_file_blocks
 from agents.introspect import find_app_object
 from agents.llm import GenerationError, require
-from schemas.messages import ApiSpec, CodeBundle, TestReport
+from agents.reasoner import plan_block
+from schemas.messages import ApiSpec, CodeBundle, Plan, TestReport, TestSuite
 
 _API_SOP = (
     "You are the Developer. Implement the given OpenAPI spec as a runnable "
@@ -117,11 +118,15 @@ def _merged(before: dict[str, str], patch: dict[str, str]) -> dict[str, str]:
     return merged
 
 
-def spec_to_code(spec: ApiSpec) -> CodeBundle:
-    """Generate the implementation. Raises ``GenerationError`` on failure."""
+def spec_to_code(spec: ApiSpec, plan: Plan | None = None) -> CodeBundle:
+    """Generate the implementation. Raises ``GenerationError`` on failure.
+
+    ``plan`` is the Reasoner's read on the requirement, offered as context. The
+    files, the entrypoint and the contract stay the binding instructions.
+    """
     if spec.kind == "program":
-        return _program_to_code(spec)
-    return _api_to_code(spec)
+        return _program_to_code(spec, plan)
+    return _api_to_code(spec, plan)
 
 
 def _require_files(files: dict[str, str], required: list[str]) -> None:
@@ -137,16 +142,17 @@ def _require_files(files: dict[str, str], required: list[str]) -> None:
         )
 
 
-def _api_to_code(spec: ApiSpec) -> CodeBundle:
-    required, plan = _file_plan_block(spec)
+def _api_to_code(spec: ApiSpec, plan: Plan | None = None) -> CodeBundle:
+    required, plan_text = _file_plan_block(spec)
     prompt = (
         f"OpenAPI spec:\n{spec.openapi_yaml[:6000]}\n\n"
-        f"Files to create (exactly these):\n{plan}\n"
+        f"Files to create (exactly these):\n{plan_text}\n"
         f"Entrypoint module: {required[0]}\n"
+        + plan_block(plan)
     )
     text, _meta = require(
         f"{prompt}Emit the file blocks.",
-        _API_SOP.format(file_plan=plan, entrypoint=required[0]),
+        _API_SOP.format(file_plan=plan_text, entrypoint=required[0]),
         role="developer",
     )
     files = parse_file_blocks(text)
@@ -160,9 +166,9 @@ def _api_to_code(spec: ApiSpec) -> CodeBundle:
     return bundle
 
 
-def _program_to_code(spec: ApiSpec) -> CodeBundle:
+def _program_to_code(spec: ApiSpec, plan: Plan | None = None) -> CodeBundle:
     """Generate a self-contained program: no HTTP layer, no ORM."""
-    required, plan = _file_plan_block(spec)
+    required, plan_text = _file_plan_block(spec)
     public = "\n".join(f"- {name}" for name in spec.public_api) or "- (none declared)"
     try:
         behaviours = (json.loads(spec.contract_text) or {}).get("behaviours") or []
@@ -171,15 +177,15 @@ def _program_to_code(spec: ApiSpec) -> CodeBundle:
     behaviour_lines = "\n".join(f"- {b}" for b in behaviours) or "- see the contract above"
     prompt = (
         f"Contract:\n{spec.contract_text[:6000]}\n\n"
-        f"Files to create (exactly these):\n{plan}\n"
+        f"Files to create (exactly these):\n{plan_text}\n"
         f"Entrypoint module: {required[0]}\n"
         f"Public names to expose:\n{public}\n"
-        f"Required behaviours:\n{behaviour_lines}\n"
+        f"Required behaviours:\n{behaviour_lines}\n" + plan_block(plan)
     )
     text, _meta = require(
         f"{prompt}Emit the file blocks.",
         _PROGRAM_SOP.format(
-            file_plan=plan,
+            file_plan=plan_text,
             entrypoint=required[0],
             public_api=public,
             behaviours=behaviour_lines,

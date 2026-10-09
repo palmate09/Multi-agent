@@ -48,6 +48,7 @@ def create_run(
         run_id=payload.run_id,
         skip_tester=payload.skip_tester,
         skip_reviewer=payload.skip_reviewer,
+        skip_reasoner=payload.skip_reasoner,
         use_docker=payload.use_docker,
     )
     store.submit(run)
@@ -139,7 +140,7 @@ def delete_run(run_id: str, store: RunStore = Depends(get_store)):
     try:
         deleted = store.delete(run_id)
     except RunningError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not deleted:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -157,3 +158,38 @@ def stop_run(run_id: str, store: RunStore = Depends(get_store)) -> dict:
     if result is None:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
     return result
+
+
+@router.post("/{run_id}/restart", response_model=RunSummary, status_code=status.HTTP_202_ACCEPTED)
+def restart_run(run_id: str, store: RunStore = Depends(get_store)) -> RunSummary:
+    """Stop if active, delete all of the run's data, and start over.
+
+    The old run id disappears; the fresh run carries the same requirement
+    and options under a new id. Returns 409 when a live worker does not
+    exit in time — nothing is deleted in that case.
+    """
+    try:
+        new_run = store.restart(run_id)
+    except RunningError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if new_run is None:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    return RunSummary(**new_run.summary)
+
+
+@router.post("/{run_id}/resume", response_model=RunSummary, status_code=status.HTTP_202_ACCEPTED)
+def resume_run(run_id: str, store: RunStore = Depends(get_store)) -> RunSummary:
+    """Continue a settled run from its saved artifacts under a fresh id.
+
+    Nothing is deleted: the old run stays as history and the new run links
+    it via ``resumed_from``. Phases with artifacts are skipped with fresh
+    retry budgets. Returns 409 for active runs (stop first) and for
+    accepted runs (nothing to resume).
+    """
+    try:
+        new_run = store.resume(run_id)
+    except RunningError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if new_run is None:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    return RunSummary(**new_run.summary)
