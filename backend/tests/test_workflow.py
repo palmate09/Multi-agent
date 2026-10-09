@@ -118,7 +118,9 @@ def test_domain_missed_is_its_own_status(monkeypatch, tmp_path):
         "requirement_to_stories",
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
-    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library())
+    monkeypatch.setattr(
+        designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library()
+    )
     # Correct, working code — for the wrong domain entirely.
     monkeypatch.setattr(
         developer,
@@ -157,7 +159,9 @@ def test_coverage_gate_runs_before_tests_are_graded(monkeypatch, tmp_path):
     )
     from agents import designer
 
-    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library())
+    monkeypatch.setattr(
+        designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library()
+    )
     monkeypatch.setattr(
         developer,
         "spec_to_code",
@@ -185,7 +189,9 @@ def test_fix_loop_stops_when_patch_changes_nothing(monkeypatch, tmp_path):
         "requirement_to_stories",
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
-    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library())
+    monkeypatch.setattr(
+        designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library()
+    )
     monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
     monkeypatch.setattr(
         developer,
@@ -235,7 +241,9 @@ def test_fix_loop_reports_llm_outage_honestly(monkeypatch, tmp_path):
         "requirement_to_stories",
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
-    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library())
+    monkeypatch.setattr(
+        designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library()
+    )
     monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
     monkeypatch.setattr(developer, "patch_code", _boom)
     monkeypatch.setattr(reviewer, "generate", lambda *a, **k: ("", {"ok": False}))
@@ -267,7 +275,9 @@ def test_fix_loop_applies_a_real_change(monkeypatch, tmp_path):
         "requirement_to_stories",
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
-    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library())
+    monkeypatch.setattr(
+        designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library()
+    )
     monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
     monkeypatch.setattr(
         developer,
@@ -315,7 +325,9 @@ def test_boot_failure_is_reported(monkeypatch, tmp_path):
         "requirement_to_stories",
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
-    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library())
+    monkeypatch.setattr(
+        designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library()
+    )
     monkeypatch.setattr(
         developer,
         "spec_to_code",
@@ -324,7 +336,10 @@ def test_boot_failure_is_reported(monkeypatch, tmp_path):
     monkeypatch.setattr(
         Workflow.Runner,
         "boot_check",
-        lambda code, timeout=60, public_api=None: (False, "ModuleNotFoundError: nonexistent_module_xyz"),
+        lambda code, timeout=60, public_api=None: (
+            False,
+            "ModuleNotFoundError: nonexistent_module_xyz",
+        ),
     )
     st = run_team(LIBRARY, out_dir=str(tmp_path / "boot"))
     assert st.status == "unresolved"
@@ -376,7 +391,9 @@ def test_boot_failure_enters_the_fix_loop(monkeypatch, tmp_path):
         "requirement_to_stories",
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
-    monkeypatch.setattr(designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library())
+    monkeypatch.setattr(
+        designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library()
+    )
     monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
     monkeypatch.setattr(
         tester,
@@ -565,7 +582,10 @@ def test_skip_reasoner_ablates_the_node(monkeypatch, tmp_path):
     events = []
     out = tmp_path / "unplanned"
     st = run_team(
-        LIBRARY, out_dir=str(out), skip_reasoner=True, on_event=lambda n, p, d: events.append((n, p, d))
+        LIBRARY,
+        out_dir=str(out),
+        skip_reasoner=True,
+        on_event=lambda n, p, d: events.append((n, p, d)),
     )
 
     assert st.status == "accepted", st.error
@@ -602,8 +622,13 @@ def test_reconstruct_state_reads_partial_artifacts(tmp_path):
         prev,
         stories.model_dump_json(),
         _spec_for_library().openapi_yaml,
-        {"kind": "api", "entrypoint": "app.py", "files": ["app.py"],
-         "public_api": [], "contract_text": ""},
+        {
+            "kind": "api",
+            "entrypoint": "app.py",
+            "files": ["app.py"],
+            "public_api": [],
+            "contract_text": "",
+        },
         LIBRARY_APP,
         "import app\n\n\ndef test_x():\n    assert True\n",
     )
@@ -649,8 +674,13 @@ def test_resume_skips_phases_with_artifacts(monkeypatch, tmp_path):
         prev,
         stories.model_dump_json(),
         _spec_for_library().openapi_yaml,
-        {"kind": "api", "entrypoint": "app.py", "files": ["app.py"],
-         "public_api": [], "contract_text": ""},
+        {
+            "kind": "api",
+            "entrypoint": "app.py",
+            "files": ["app.py"],
+            "public_api": [],
+            "contract_text": "",
+        },
         LIBRARY_APP,
         "import app\n\n\ndef test_x():\n    assert True\n",
     )

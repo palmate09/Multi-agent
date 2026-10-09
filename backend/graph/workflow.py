@@ -376,9 +376,7 @@ def run_team(
 
         if st.spec is None:
             emit("designer", "start")
-            st.spec = Designer.stories_to_spec(
-                st.stories, requirement=requirement, plan=st.plan
-            )
+            st.spec = Designer.stories_to_spec(st.stories, requirement=requirement, plan=st.plan)
             _save(out, "spec.yaml", st.spec.openapi_yaml)
             _save(
                 out,
@@ -629,7 +627,9 @@ def run_team(
             st.error = f"tests still failing after {st.retry_dev} developer retries"
             break
         try:
-            st.code = Developer.patch_code(st.code, st.report, refl, tests=st.tests, kind=st.spec.kind)
+            st.code = Developer.patch_code(
+                st.code, st.report, refl, tests=st.tests, kind=st.spec.kind
+            )
         except GenerationError as exc:
             # The model was never reached (rate limit, outage): the bundle is
             # unchanged but NOT because the model tried and gave up. Say so —
@@ -650,9 +650,7 @@ def run_team(
         # Re-verify the entrypoint still resolves after a patch. A program has
         # no ASGI app object; its entrypoint is the declared module.
         if st.spec.kind == "program":
-            if not st.code.entry_module or not any(
-                f == st.spec.entrypoint for f in st.code.files
-            ):
+            if not st.code.entry_module or not any(f == st.spec.entrypoint for f in st.code.files):
                 st.status = "unresolved"
                 st.error = "patched code no longer contains the declared entrypoint"
                 break

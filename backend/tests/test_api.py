@@ -323,6 +323,7 @@ def test_restart_refuses_stuck_worker_without_deleting(tmp_path, monkeypatch):
     get_settings.cache_clear()
     store = RunStore(get_settings())
     try:
+
         def stuck(requirement, out_dir, **kw):
             _time.sleep(5)
             from schemas.messages import GraphState
@@ -359,16 +360,23 @@ def _partial_run_team(requirement, out_dir, on_event=None, run_id=None, **kw):
     (out / "spec.yaml").write_text("openapi: 3.1.0\ninfo: {title: Library}\npaths: {}\n")
     (out / "plan.json").write_text(
         _json.dumps(
-            {"kind": "api", "entrypoint": "app.py", "files": ["app.py"],
-             "public_api": [], "contract_text": ""}
+            {
+                "kind": "api",
+                "entrypoint": "app.py",
+                "files": ["app.py"],
+                "public_api": [],
+                "contract_text": "",
+            }
         )
     )
     (out / "code" / "app.py").write_text("x = 1\n")
     (out / "tests" / "test_app.py").write_text("import app\n\ndef test_x():\n    assert True\n")
     _partial_run_team.seen.append(kw.get("resume"))
     return GraphState(
-        requirement=requirement, run_id=run_id or "partial",
-        status="cancelled", error="stopped by user",
+        requirement=requirement,
+        run_id=run_id or "partial",
+        status="cancelled",
+        error="stopped by user",
     )
 
 
