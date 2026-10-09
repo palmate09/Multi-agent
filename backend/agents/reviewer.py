@@ -25,6 +25,34 @@ _UNSAFE = re.compile(
     r"\beval\s*\(|\bexec\s*\(|f['\"].{0,80}?\bSELECT\b|f['\"].{0,80}?\bINSERT\b", re.I | re.S
 )
 
+# A session factory called as a route-handler default argument. Seen in a real
+# run as ``db=SessionLocal()``: FastAPI deepcopies parameter defaults when it
+# builds each route and a session cannot be copied, so every request dies with
+# ``TypeError: cannot pickle 'module'`` before reaching the handler. Matched
+# against the dumped default node, so SessionLocal(), Session() and
+# sessionmaker(...)() are all caught while Depends(get_db) passes.
+_SESSION_FACTORY_CALL = re.compile(r"session", re.I)
+
+
+def _route_handlers(tree: ast.AST) -> list[ast.FunctionDef]:
+    """Functions decorated with an HTTP-method route (``@app.get`` etc.)."""
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            func = dec.func if isinstance(dec, ast.Call) else dec
+            if isinstance(func, ast.Attribute) and func.attr in {
+                "get",
+                "post",
+                "put",
+                "patch",
+                "delete",
+            }:
+                out.append(node)
+                break
+    return out
+
 
 def _all_code(code: CodeBundle) -> str:
     return "\n".join(code.files.values())
@@ -264,6 +292,35 @@ def _api_checks(
                 location="code",
             )
         )
+
+    # 7. Route handlers must not take a live session as a default argument.
+    for name, body in code.files.items():
+        if not name.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(body)
+        except SyntaxError:
+            continue
+        for handler in _route_handlers(tree):
+            bad = [
+                d
+                for d in list(handler.args.defaults)
+                + [d for d in handler.args.kw_defaults if d is not None]
+                if isinstance(d, ast.Call) and _SESSION_FACTORY_CALL.search(ast.dump(d))
+            ]
+            if bad:
+                out.append(
+                    ReviewComment(
+                        severity="blocker",
+                        message=(
+                            f"Handler {handler.name!r} takes a live session as a default "
+                            "argument; FastAPI deepcopies parameter defaults when it "
+                            "builds the route and a session cannot be copied, so every "
+                            "request fails. Use `db: Session = Depends(get_db)` instead."
+                        ),
+                        location=name,
+                    )
+                )
 
     # 8. Tests must exist and cover the declared error codes.
     tests_body = "\n".join(tests.files.values())

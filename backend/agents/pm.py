@@ -160,6 +160,17 @@ _2XX_VS_ERROR_ASSERT = re.compile(
     re.I,
 )
 
+# The app crashes copying a live resource: a route handler takes a session
+# object as a default argument (``db=SessionLocal()``), FastAPI deepcopies
+# parameter defaults when it builds each route, and a SQLAlchemy session
+# references the DBAPI module, which cannot be copied
+# (``TypeError: cannot pickle 'module'``). Seen in a real run where all 9
+# tests failed identically and the LLM triage misrouted to the Tester twice
+# before the Developer stalled with no change. Only the implementation can fix
+# this, so it leads the deterministic checks: an app-runtime traceback naming
+# the ORM can never be a bad test expectation.
+_SESSION_COPY_CTX = ("sqlalchemy", "deepcopy", "dbapi", "sessionmaker")
+
 
 def triage(report: TestReport) -> str:
     """Return ``code_bug`` or ``test_bug``.
@@ -181,6 +192,9 @@ def triage(report: TestReport) -> str:
     # Only meaningful when other tests pass. A suite failing everywhere is a
     # broken application, not a bad expectation.
     enough_passing = report.passed >= 3
+
+    if "cannot pickle" in blob and any(m in blob for m in _SESSION_COPY_CTX):
+        return "code_bug"
 
     if enough_passing and any(m in blob for m in _STRONG_TEST_BUG):
         # Decided without consulting the model. This shape of failure is

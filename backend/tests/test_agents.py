@@ -495,6 +495,108 @@ def test_triage_never_misroutes_real_code_bugs(monkeypatch, error):
     assert pm.triage(report) == "code_bug", error
 
 
+PICKLE_SESSION_RAW = (
+    "copy.py:162: in deepcopy y = _reconstruct(x, memo, *rv) "
+    "sqlalchemy.orm.session.Session object identity_map "
+    "x = <module 'sqlite3.dbapi2'> "
+    "TypeError: cannot pickle 'module' object"
+)
+
+
+def test_triage_routes_unpicklable_session_to_the_developer(monkeypatch):
+    """All 9 tests dying in deepcopy of a Session is a code bug, full stop.
+
+    Real signature from run-20261009-131219: every handler took
+    ``db=SessionLocal()`` as a default, FastAPI deepcopied the session while
+    building each route, and nothing could pass. The LLM triage misrouted this
+    to the Tester twice, so the deterministic rule must overrule the model.
+    """
+    monkeypatch.setattr(pm, "require", lambda *a, **k: ("test_bug", {"ok": True}))
+    from schemas.messages import TestFailure, TestReport
+
+    report = TestReport(
+        passed=0,
+        failed=9,
+        failures=[
+            TestFailure(name="t", error="TypeError: cannot pickle 'module' object")
+        ],
+        raw=PICKLE_SESSION_RAW,
+    )
+    assert pm.triage(report) == "code_bug"
+
+
+def test_reflect_diagnoses_session_default_argument_without_llm():
+    """The reflection must name the SessionLocal() default-arg cause directly.
+
+    The truncated one-liner ("TypeError: cannot pickl...") hides it, so the
+    diagnosis reads the runner output, not the model.
+    """
+    from schemas.messages import TestFailure, TestReport
+
+    report = TestReport(
+        passed=0,
+        failed=9,
+        failures=[
+            TestFailure(name="t", error="TypeError: cannot pickle 'module' object")
+        ],
+        raw=PICKLE_SESSION_RAW,
+    )
+    text = developer.reflect(report)
+    assert "SessionLocal()" in text
+    assert "Depends(get_db)" in text
+
+
+def test_reviewer_blocks_session_as_handler_default():
+    """``db=SessionLocal()`` on a route handler must fail review as a blocker."""
+    from agents import reviewer
+    from schemas.messages import CodeBundle, TestReport, TestSuite
+
+    code = CodeBundle(
+        files={
+            "main.py": (
+                "from fastapi import FastAPI\n"
+                "app = FastAPI()\n"
+                "@app.get('/x')\n"
+                "def read_x(db=SessionLocal()):\n"
+                "    return []\n"
+            )
+        },
+        entry_module="main",
+        entry_attr="app",
+    )
+    spec = ApiSpec(openapi_yaml="x", entrypoint="main.py", files=["main.py"])
+    comments = reviewer._api_checks(
+        code, spec, TestSuite(files={}), TestReport(passed=0, failed=0)
+    )
+    blockers = [c for c in comments if c.severity == "blocker"]
+    assert any("Depends(get_db)" in c.message for c in blockers)
+
+
+def test_reviewer_allows_depends_injected_session():
+    """``db: Session = Depends(get_db)`` must not trip the session check."""
+    from agents import reviewer
+    from schemas.messages import CodeBundle, TestReport, TestSuite
+
+    code = CodeBundle(
+        files={
+            "main.py": (
+                "from fastapi import Depends, FastAPI\n"
+                "app = FastAPI()\n"
+                "@app.get('/x')\n"
+                "def read_x(db=Depends(get_db)):\n"
+                "    return []\n"
+            )
+        },
+        entry_module="main",
+        entry_attr="app",
+    )
+    spec = ApiSpec(openapi_yaml="x", entrypoint="main.py", files=["main.py"])
+    comments = reviewer._api_checks(
+        code, spec, TestSuite(files={}), TestReport(passed=0, failed=0)
+    )
+    assert not [c for c in comments if "default argument" in c.message]
+
+
 def test_tester_prompt_forbids_impossible_error_assertions():
     assert "must be satisfiable" in tester._API_SOP
     assert "valid list request and returns" in tester._API_SOP

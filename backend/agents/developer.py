@@ -254,6 +254,25 @@ def repair_lint(code: CodeBundle, ruff_out: str, rounds: int = 2, kind: str = "a
 def reflect(report: TestReport, kind: str = "api") -> str:
     """2-3 sentences on root cause and fix direction (Reflexion)."""
     blob = "; ".join(f"{f.name}: {f.error}" for f in report.failures[:5])
+    detail = (blob + " " + (report.raw or "")).lower()
+    if "cannot pickle" in detail and any(
+        m in detail for m in ("sqlalchemy", "deepcopy", "dbapi", "sessionmaker")
+    ):
+        # Decided without consulting the model: a route handler takes a live
+        # SQLAlchemy session as a default argument (``db=SessionLocal()``).
+        # FastAPI deepcopies parameter defaults when it builds each route and a
+        # session cannot be copied, so every request dies before reaching the
+        # handler. The truncated one-line failure hides this completely.
+        return (
+            "Root cause: a route handler takes a live SQLAlchemy session as a "
+            "default argument (e.g. `db=SessionLocal()`). FastAPI deepcopies "
+            "parameter defaults when it builds each route, and a session cannot "
+            "be deepcopied because it references the DBAPI module. Fix: give "
+            "every handler the signature `db: Session = Depends(get_db)`, import "
+            "Depends from fastapi and Session from sqlalchemy.orm, keep the "
+            "`get_db` generator, and never call SessionLocal() at import time or "
+            "as a default value."
+        )
     system = (
         "You reflect on test failures of a Python program (not a web service)."
         if kind == "program"
@@ -311,6 +330,11 @@ def patch_code(
             f"### {name}\n```python\n{body[:5000]}\n```" for name, body in tests.files.items()
         )
     failures = "; ".join(f"{f.name}: {f.error[:200]}" for f in report.failures[:5])
+    # The one-line failure above is often truncated past usefulness (e.g.
+    # "TypeError: cannot pickl..."). The traceback tail carries the frames the
+    # model needs to locate the cause, so it travels with the patch request.
+    raw_tail = (report.raw or "").strip()[-1600:]
+    trace_block = f"\n\nTest runner output (tail):\n{raw_tail}\n" if raw_tail else ""
     tail = (
         "Reply with ONLY the file blocks you changed, complete and runnable. "
         "Change only what fixes the failures. No prose. If the test drives an "
@@ -326,7 +350,7 @@ def patch_code(
     )
     try:
         text, _meta = require(
-            f"Reflection: {reflection}\n\nFailing tests:\n{failures}\n\n"
+            f"Reflection: {reflection}\n\nFailing tests:\n{failures}\n{trace_block}\n"
             f"Current code:\n{current}{test_block}\n\n"
             + tail,
             (_PROGRAM_SOP if kind == "program" else SOP).format(
