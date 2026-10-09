@@ -1,26 +1,76 @@
 [
   {
-    "run": "eval_task-manager",
+    "run": "verify_recipes",
     "status": "accepted",
+    "error": null,
     "test_pass_rate": 1.0,
     "spec_coverage": 1.0,
+    "spec_endpoints": 4,
+    "implemented_endpoints": 4,
     "attempts_to_green": 0,
-    "wall_time": 1.8
+    "review_rounds": 0,
+    "files": [
+      "main.py",
+      "requirements.txt"
+    ],
+    "entrypoint": "main",
+    "wall_time": 45.7
   },
   {
-    "run": "eval_task-manager-filter",
+    "run": "verify_library",
     "status": "accepted",
+    "error": null,
     "test_pass_rate": 1.0,
     "spec_coverage": 1.0,
-    "attempts_to_green": 0,
-    "wall_time": 1.8
+    "spec_endpoints": 3,
+    "implemented_endpoints": 3,
+    "attempts_to_green": 1,
+    "review_rounds": 0,
+    "files": [
+      "main.py",
+      "requirements.txt"
+    ],
+    "entrypoint": "main",
+    "wall_time": 72.6
   },
   {
-    "run": "eval_task-manager-notes",
+    "run": "verify_inventory",
     "status": "accepted",
+    "error": null,
     "test_pass_rate": 1.0,
     "spec_coverage": 1.0,
+    "spec_endpoints": 4,
+    "implemented_endpoints": 4,
     "attempts_to_green": 0,
-    "wall_time": 1.8
+    "review_rounds": 0,
+    "files": [
+      "database.py",
+      "main.py",
+      "models.py",
+      "requirements.txt",
+      "schemas.py"
+    ],
+    "entrypoint": "main",
+    "wall_time": 99.2
+  },
+  {
+    "run": "verify_final",
+    "status": "accepted",
+    "error": null,
+    "test_pass_rate": 1.0,
+    "spec_coverage": 1.0,
+    "spec_endpoints": 4,
+    "implemented_endpoints": 4,
+    "attempts_to_green": 1,
+    "review_rounds": 0,
+    "files": [
+      "database.py",
+      "main.py",
+      "models.py",
+      "requirements.txt",
+      "schemas.py"
+    ],
+    "entrypoint": "main",
+    "wall_time": 126.6
   }
 ]

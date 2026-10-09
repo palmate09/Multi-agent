@@ -2,6 +2,7 @@
 #   Caddy (TLS + static SPA fallback) -> frontend (nginx, serves built assets)
 #                                                 -> backend (FastAPI)
 # Run artifacts live on a named volume; /data/runs is NOT exposed to the host.
+# Must differ from the root docker-compose.yml (see the note there).
 name: multi-agent-team
 
 services:
@@ -50,12 +51,30 @@ services:
       RUNS_DIR: /data/runs
       # Ollama runs on the host; reach it over the docker bridge gateway.
       OLLAMA_URL: "${OLLAMA_URL:-http://host.docker.internal:11434}"
-      OLLAMA_MODEL: "${OLLAMA_MODEL:-qwen2.5-coder:7b-instruct-q4_K_M}"
+      # Per-role models. The Designer uses the larger one for structured YAML
+      # quality; the code-generating roles use the smaller one because at ~12
+      # vs ~6.5 tok/s on CPU it halves wall time.
+      OLLAMA_MODEL_PM: "${OLLAMA_MODEL_PM:-qwen2.5-coder:3b}"
+      OLLAMA_MODEL_DESIGNER: "${OLLAMA_MODEL_DESIGNER:-qwen2.5-coder:7b-instruct-q4_K_M}"
+      OLLAMA_MODEL_DEVELOPER: "${OLLAMA_MODEL_DEVELOPER:-qwen2.5-coder:3b}"
+      OLLAMA_MODEL_TESTER: "${OLLAMA_MODEL_TESTER:-qwen2.5-coder:3b}"
+      OLLAMA_MODEL_REVIEWER: "${OLLAMA_MODEL_REVIEWER:-qwen2.5-coder:3b}"
+      # Per-call ceiling for local inference. CPU-only hosts need minutes, not
+      # seconds, for a full code generation.
+      OLLAMA_TIMEOUT: "${OLLAMA_TIMEOUT:-600}"
       SKIP_OLLAMA: "${SKIP_OLLAMA:-1}"
-      # ---- auth (see docs/DEPLOY.md §4) ----
+      # Provider selection: gemini (fast, needs a key) or local (Ollama).
+      LLM_PROVIDER: "${LLM_PROVIDER:-gemini}"
+      LLM_TIMEOUT: "${LLM_TIMEOUT:-120}"
+      GEMINI_MODELS: "${GEMINI_MODELS:-gemini-3-flash-preview,gemini-flash-latest,gemini-3.8-flash}"
+      GEMINI_MAX_OUTPUT_TOKENS: "${GEMINI_MAX_OUTPUT_TOKENS:-8192}"
+      # 1 = never fall back to a hosted key when a local model is available, so a
+      # rate-limited key cannot silently change what the run produces.
+      PREFER_LOCAL_ONLY: "${PREFER_LOCAL_ONLY:-0}"
+      # ---- auth (run ./deploy/bootstrap-env.sh to generate these) ----
       AUTH_USERNAME: "${AUTH_USERNAME:-admin}"
-      AUTH_SECRET: "${AUTH_SECRET:?AUTH_SECRET is required; run backend/scripts/gen_auth.py}"
-      AUTH_PASSWORD_HASH: "${AUTH_PASSWORD_HASH:?AUTH_PASSWORD_HASH is required}"
+      AUTH_SECRET: "${AUTH_SECRET:?missing - run ./deploy/bootstrap-env.sh}"
+      AUTH_PASSWORD_HASH: "${AUTH_PASSWORD_HASH:?missing - run ./deploy/bootstrap-env.sh}"
       AUTH_API_KEY: "${AUTH_API_KEY:-}"
       AUTH_COOKIE_SECURE: "${AUTH_COOKIE_SECURE:-0}"
       AUTH_SESSION_HOURS: "${AUTH_SESSION_HOURS:-12}"
@@ -68,6 +87,8 @@ services:
       # docs/DEPLOY.md for the isolation trade-off.
       SANDBOX_USE_DOCKER: "${SANDBOX_USE_DOCKER:-false}"
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      # Pin a single id if desired; otherwise GEMINI_MODELS above is used.
+      GEMINI_MODEL: "${GEMINI_MODEL:-}"
       GROQ_API_KEY: "${GROQ_API_KEY:-}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
       GITHUB_TOKEN: "${GITHUB_TOKEN:-}"

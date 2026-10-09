@@ -44,11 +44,15 @@ def llm_status(settings: Settings) -> LlmStatus:
     url = os.getenv("OLLAMA_URL", "http://localhost:11434")
     models = [] if os.getenv("AGENT_TEAM_TESTING") == "1" else _probe_ollama(url)
     skip = os.getenv("SKIP_OLLAMA", "") == "1"
+    from agents import llm as llm_mod
+
     return LlmStatus(
         ollama_reachable=bool(models),
         ollama_models=models,
         skip_ollama=skip,
         hosted_keys_present=[k for k in HOSTED_KEYS if os.getenv(k)],
+        last_failures=list(llm_mod._FAILURES),
+        last_model=llm_mod._LAST_MODEL[-1] if llm_mod._LAST_MODEL else "",
     )
 
 

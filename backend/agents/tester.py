@@ -1,90 +1,104 @@
-"""Tester: spec+stories -> pytest suite. NEVER reads code (AgentCoder anti-bias)."""
+"""Tester: spec + stories -> pytest suite. NEVER reads code (AgentCoder rule).
+
+The 63-line task-manager suite that used to live here is gone. It was the
+fallback whenever generation failed, which meant a library request was graded
+by task-manager tests against a task-manager app. Now the suite is generated
+from the spec, bound to the real entrypoint discovered from the code, and a
+generation failure raises rather than substituting anything.
+"""
 
 from __future__ import annotations
 
-from agents.llm import generate
+import re
+
+from agents.blocks import strip_fence
+from agents.introspect import declared_status_codes, spec_paths
+from agents.llm import GenerationError, require
 from schemas.messages import ApiSpec, TestSuite, UserStories
 
-TEMPLATE_TESTS = '''"""Auto-generated Tester suite: success + validation + error per endpoint."""
-import os
-os.environ["TASKS_DB"] = "./test_tasks.db"
-import pathlib
-for p in ("./test_tasks.db", "./tasks.db"):
-    try:
-        pathlib.Path(p).unlink()
-    except FileNotFoundError:
-        pass
-from fastapi.testclient import TestClient
-import main
-client = TestClient(main.app)
-
-def test_health():
-    r = client.get("/health")
-    assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
-
-def test_create_task_success():
-    r = client.post("/tasks", json={"title": "Buy milk"})
-    assert r.status_code == 201
-    body = r.json()
-    assert body["title"] == "Buy milk"
-    assert "id" in body
-
-def test_create_task_validation():
-    r = client.post("/tasks", json={"title": ""})
-    assert r.status_code == 422
-    r = client.post("/tasks", json={})
-    assert r.status_code == 422
-
-def test_list_tasks():
-    client.post("/tasks", json={"title": "A"})
-    r = client.get("/tasks")
-    assert r.status_code == 200
-    assert isinstance(r.json(), list)
-    assert len(r.json()) >= 1
-
-def test_get_task_and_404():
-    c = client.post("/tasks", json={"title": "G"})
-    tid = c.json()["id"]
-    r = client.get(f"/tasks/{tid}")
-    assert r.status_code == 200
-    assert r.json()["id"] == tid
-    r = client.get("/tasks/999999")
-    assert r.status_code == 404
-
-def test_update_task_and_404():
-    c = client.post("/tasks", json={"title": "U"})
-    tid = c.json()["id"]
-    r = client.put(f"/tasks/{tid}", json={"title": "U2", "done": True})
-    assert r.status_code == 200
-    assert r.json()["title"] == "U2"
-    r = client.put("/tasks/999999", json={"title": "x"})
-    assert r.status_code == 404
-
-def test_delete_task_and_404():
-    c = client.post("/tasks", json={"title": "D"})
-    tid = c.json()["id"]
-    r = client.delete(f"/tasks/{tid}")
-    assert r.status_code == 200
-    assert client.get(f"/tasks/{tid}").status_code == 404
-    assert client.delete("/tasks/999999").status_code == 404
-'''
-
 SOP = (
-    "You are the Tester. Given ONLY the OpenAPI spec + stories, output ONE pytest file "
-    "using fastapi.testclient covering success/validation/error for every endpoint. "
-    "No prose, code only."
+    "You are the Tester. Write ONE pytest file for the application described by the "
+    "spec below. You have NOT seen the implementation and must infer behaviour from "
+    "the spec alone.\n"
+    "Hard requirements:\n"
+    "- The application module is `{module}` and the ASGI app object is `{module}.{attr}`.\n"
+    "- Start with `import {module}` and use `{module}.{attr}` with fastapi.testclient.TestClient.\n"
+    "- NEVER construct your own FastAPI() or APIRouter(); that would test a stub, not the app.\n"
+    "- Point the app at a throwaway SQLite file via the database path the code reads, "
+    "and delete stale test databases before importing.\n"
+    "- Cover, for every endpoint: the success path, the validation/error status codes the "
+    "spec declares (e.g. 404 for unknown ids, 422 for missing fields), and at least one "
+    "boundary case.\n"
+    "Assert ONLY what the spec states. In particular:\n"
+    "- Do not assert on the *shape of an error body* (keys like 'error' or 'detail', message "
+    "wording). The spec fixes the status code, not the envelope. `assert response.status_code "
+    "== 404` is correct; `assert 'error' in response.json()` is not.\n"
+    "- Do not assert an exact status code the spec does not declare. FastAPI answers 422 for a "
+    "schema violation where a hand-written API might answer 400; assert only codes the spec "
+    "names, or assert the code is a 4xx client error.\n"
+    "- Prefer asserting on data the spec describes (fields, ids, counts) over incidental "
+    "response keys.\n"
+    "Output ONE fenced ```python block containing only the test file. No prose."
 )
 
+_FABRICATES_APP = re.compile(r"=\s*(?:FastAPI|APIRouter)\s*\(", re.M)
+_IMPORTS_TARGET = re.compile(r"^\s*(?:import\s+{m}\b|from\s+{m}\s+import)", re.M)
 
-def spec_to_tests(spec: ApiSpec, stories: UserStories) -> TestSuite:
+
+def _tests_the_real_app(body: str, module: str) -> bool:
+    """True when the suite exercises the generated app rather than a stub.
+
+    The Tester never sees the code, so it will sometimes inline its own FastAPI
+    app. Those tests pass while the real application is never imported, which
+    makes the whole gate meaningless.
+    """
+    pattern = _IMPORTS_TARGET.pattern.format(m=re.escape(module))
+    return re.search(pattern, body, re.M) is not None and not _FABRICATES_APP.search(body)
+
+
+def _status_codes_in_spec(spec_yaml: str) -> set[str]:
+    """Error codes the spec declares, so the Tester is told to cover them."""
+    return {c for c in declared_status_codes(spec_yaml) if c not in ("200", "201", "204")}
+
+
+def spec_to_tests(
+    spec: ApiSpec,
+    stories: UserStories,
+    entry_module: str = "main",
+    entry_attr: str = "app",
+) -> TestSuite:
+    """Generate the suite. Raises ``GenerationError`` on failure.
+
+    ``entry_module``/``entry_attr`` come from inspecting the generated code, so
+    a module named ``app.py`` with ``app = FastAPI()`` is handled without any
+    special case for a name.
+    """
+    if not entry_module:
+        raise GenerationError("Tester needs the application entrypoint, which was not resolved")
     listing = "\n".join(f"- {s.title}: {'; '.join(s.acceptance)}" for s in stories.stories)
-    text, _ = generate(
-        f"Spec:\n{spec.openapi_yaml[:2000]}\nStories:\n{listing}\nEmit pytest only.",
-        SOP,
-        role="tester",
-        max_tokens=4000,
+    pairs, _paths = spec_paths(spec.openapi_yaml)
+    endpoint_list = (
+        "\n".join(f"- {m} {p}" for p, m in sorted(pairs)) or "(read from the spec below)"
     )
-    if text and "def test_" in text and "TestClient" in text:
-        return TestSuite(files={"test_tasks.py": text})
-    return TestSuite(files={"test_tasks.py": TEMPLATE_TESTS})
+    codes = sorted(_status_codes_in_spec(spec.openapi_yaml))
+    prompt = (
+        f"Spec:\n{spec.openapi_yaml[:6000]}\n\n"
+        f"Endpoints:\n{endpoint_list}\n\n"
+        f"Stories:\n{listing}\n\n"
+        f"Error status codes the spec declares: {codes or 'none explicitly'}\n"
+        f"Application module: {entry_module} (app object: {entry_module}.{entry_attr})\n"
+    )
+    text, _meta = require(
+        f"{prompt}Emit the pytest file.",
+        SOP.format(module=entry_module, attr=entry_attr),
+        role="tester",
+    )
+    body = strip_fence(text)
+    if "def test_" not in body:
+        raise GenerationError("Tester produced no test functions")
+    if not _tests_the_real_app(body, entry_module):
+        raise GenerationError(
+            f"Tester suite does not import {entry_module!r} or declares its own FastAPI app, "
+            "so it would not exercise the generated application"
+        )
+    return TestSuite(files={"test_app.py": body})

@@ -38,6 +38,11 @@ class RunSummary(BaseModel):
     attempts_test: int = 0
     review_rounds: int = 0
     wall_time: float | None = None
+    # Which module the generated app was imported from, e.g. "app". Discovered
+    # from the code rather than assumed, so it is worth surfacing.
+    entrypoint: str | None = None
+    files: list[str] = []
+    error: str | None = None
 
 
 class RunDetail(RunSummary):
@@ -49,8 +54,9 @@ class RunDetail(RunSummary):
     tests: dict[str, str] = Field(default_factory=dict)
     review: dict[str, Any] | None = None
     report: dict[str, Any] | None = None
+    # Domain coverage verdict: which requirement terms the code reflects.
+    coverage: dict[str, Any] | None = None
     memory: list[str] = Field(default_factory=list)
-    error: str | None = None
 
 
 class LlmStatus(BaseModel):
@@ -58,6 +64,11 @@ class LlmStatus(BaseModel):
     ollama_models: list[str] = Field(default_factory=list)
     skip_ollama: bool
     hosted_keys_present: list[str] = Field(default_factory=list)
+    # Why the hosted tiers declined on the most recent call, e.g. an exhausted
+    # free-tier quota. Without this a quota outage is indistinguishable from a
+    # healthy run, because every call quietly falls back to template mode.
+    last_failures: list[str] = Field(default_factory=list)
+    last_model: str = ""
 
 
 class HealthResponse(BaseModel):

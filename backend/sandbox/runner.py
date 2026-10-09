@@ -12,12 +12,28 @@ PY = sys.executable or "python"
 
 
 def write_bundle(code: CodeBundle, tests: TestSuite, dest: Path) -> None:
-    for rel, content in {**code.files, **{f"tests/{k}" if not k.startswith('test') else k: v for k, v in tests.files.items()}}.items():
-        # tests go to dest root for pytest discovery; code files to dest root
-        name = rel.split("/")[-1]
-        target = dest / name if name.startswith("test_") else dest / rel
+    """Lay the generated files out so ``pytest`` can import and collect them.
+
+    Package-style modules (``routers/loans.py``) are written as directories and
+    given an ``__init__.py``, because a generated plan can ask for several
+    modules and relative imports then need a package to resolve against.
+    """
+    everything: dict[str, str] = {**code.files, **{f"tests/{k}": v for k, v in tests.files.items()}}
+    for rel, content in everything.items():
+        rel = rel.lstrip("/")
+        if not rel or rel.startswith("..") or Path(rel).is_absolute():
+            continue
+        if rel.startswith("tests/"):
+            # Test modules sit at the root so pytest's rootdir-based sys.path
+            # insertion lets `import <entrypoint>` resolve.
+            rel = rel[len("tests/") :]
+        target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
+    # Any directory that got modules becomes a package.
+    for directory in {p for p in dest.rglob("*") if p.is_dir()}:
+        if any(f.suffix == ".py" for f in directory.iterdir() if f.is_file()):
+            (directory / "__init__.py").touch()
 
 
 def _parse_pytest(output: str) -> TestReport:
@@ -36,6 +52,16 @@ def _parse_pytest(output: str) -> TestReport:
         for line in output.splitlines():
             if line.startswith("FAILED"):
                 failures.append(TestFailure(name=line.split()[1][:120], error=line[:300]))
+    # A collection/import error never prints "N failed", so a suite that could
+    # not even be collected would otherwise report 0/0 and look green.
+    if failed == 0:
+        errors = re.search(r"(\d+) errors?", output)
+        if errors:
+            failed = int(errors.group(1))
+    if failed == 0 and passed == 0 and ("ERROR collecting" in output or "INTERNALERROR" in output):
+        failed = 1
+    if failed == 0 and passed == 0 and output.strip() and "no tests ran" in output:
+        failed = 1
     return TestReport(passed=passed, failed=failed, failures=failures[:10], raw=output[-4000:])
 
 
@@ -71,14 +97,38 @@ def run_tests(code: CodeBundle, tests: TestSuite, timeout: int = 60, use_docker:
     return run_tests_local(code, tests, timeout)
 
 
-def boot_check(code: CodeBundle, timeout: int = 30) -> tuple[bool, str]:
+def boot_check(code: CodeBundle, timeout: int = 60) -> tuple[bool, str]:
+    """Import the generated application and confirm the ASGI app exists.
+
+    The module to import is resolved from the code (``agents.introspect``)
+    rather than assumed to be ``main``: a real generation names the entrypoint
+    whatever suits it, and hardcoding ``main`` reported "does not boot" for an
+    app that imported perfectly well.
+    """
+    found = None
+    if code.entry_module:
+        found = (code.entry_module, code.entry_attr or "app")
+    if not found:
+        from agents.introspect import find_app_object
+
+        found = find_app_object(code.files)
+    if not found:
+        return False, "no module assigns a FastAPI() app to a module-level name"
+    module, attr = found
     tmp = Path(tempfile.mkdtemp(prefix="agent-boot-"))
     try:
         write_bundle(code, TestSuite(files={}), tmp)
-        env_py = "import main; print('boot-ok')"
-        p = subprocess.run([PY, "-c", env_py], cwd=tmp, capture_output=True, text=True, timeout=timeout)
+        probe = (
+            f"import {module} as _m; "
+            f"a = getattr(_m, {attr!r}, None); "
+            f"assert a is not None, 'module has no {attr}'; "
+            f"print('boot-ok', type(a).__name__)"
+        )
+        p = subprocess.run([PY, "-c", probe], cwd=tmp, capture_output=True, text=True, timeout=timeout)
         ok = "boot-ok" in p.stdout
         return ok, (p.stdout + p.stderr)[-1000:]
+    except subprocess.TimeoutExpired:
+        return False, f"import of {module} timed out after {timeout}s"
     except Exception as e:
         return False, str(e)
     finally:
