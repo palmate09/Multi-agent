@@ -506,21 +506,17 @@ def test_out_of_range_effort_is_clamped_down_not_sent(monkeypatch):
     monkeypatch.setenv("LLM_REASONING_EFFORT", "xhigh")
     body = llm._reasoning_body("groq", "openai/gpt-oss-120b", "developer")
     assert body["reasoning_effort"] == "high"
-    assert llm._reasoning_body("groq", "qwen/qwen3.8-27b", "developer")[
-        "reasoning_effort"
-    ] == "high"
+    assert (
+        llm._reasoning_body("groq", "qwen/qwen3.8-27b", "developer")["reasoning_effort"] == "high"
+    )
 
     monkeypatch.setenv("LLM_REASONING_EFFORT", "minimal")
     # Below every allowed value: fall to the lowest one that exists.
-    assert llm._reasoning_body("groq", "qwen/qwen3.8-27b", "developer")[
-        "reasoning_effort"
-    ] == "low"
+    assert llm._reasoning_body("groq", "qwen/qwen3.8-27b", "developer")["reasoning_effort"] == "low"
 
     monkeypatch.setenv("LLM_REASONING_EFFORT", "none")
     # "none" means do not reason, so no effort key is sent at all.
-    assert "reasoning_effort" not in llm._reasoning_body(
-        "groq", "qwen/qwen3.8-27b", "developer"
-    )
+    assert "reasoning_effort" not in llm._reasoning_body("groq", "qwen/qwen3.8-27b", "developer")
 
 
 def test_openai_compat_returns_the_answer_and_captures_the_reasoning(monkeypatch):

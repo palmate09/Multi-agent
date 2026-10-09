@@ -94,7 +94,9 @@ paths:
 ```
 """
     monkeypatch.setattr(designer, "require", lambda *a, **k: (reply, {"ok": True}))
-    spec = designer.stories_to_spec(_stories(), requirement="Build a REST API for a library that lends books")
+    spec = designer.stories_to_spec(
+        _stories(), requirement="Build a REST API for a library that lends books"
+    )
     assert spec.entrypoint == "service.py"
     assert spec.files == ["service.py", "models.py"]
     assert "/loans" in spec.endpoints
@@ -103,7 +105,9 @@ paths:
 def test_designer_defaults_plan_when_model_omits_it(monkeypatch):
     reply = "```yaml\nopenapi: 3.1.0\ninfo: {title: L, version: 1.0.0}\npaths:\n  /loans:\n    post:\n      responses: {'201': {description: ok}}\n```"
     monkeypatch.setattr(designer, "require", lambda *a, **k: (reply, {"ok": True}))
-    spec = designer.stories_to_spec(_stories(), requirement="Build a REST API for a library that lends books")
+    spec = designer.stories_to_spec(
+        _stories(), requirement="Build a REST API for a library that lends books"
+    )
     assert spec.entrypoint.endswith(".py")
     assert spec.entrypoint in spec.files
 
@@ -117,7 +121,9 @@ def test_designer_raises_after_three_bad_attempts(monkeypatch):
 
     monkeypatch.setattr(designer, "require", always_bad)
     with pytest.raises(llm.GenerationError, match="valid OpenAPI"):
-        designer.stories_to_spec(_stories(), requirement="Build a REST API for a library that lends books")
+        designer.stories_to_spec(
+            _stories(), requirement="Build a REST API for a library that lends books"
+        )
     assert calls["n"] == 3
 
 
@@ -517,9 +523,7 @@ def test_triage_routes_unpicklable_session_to_the_developer(monkeypatch):
     report = TestReport(
         passed=0,
         failed=9,
-        failures=[
-            TestFailure(name="t", error="TypeError: cannot pickle 'module' object")
-        ],
+        failures=[TestFailure(name="t", error="TypeError: cannot pickle 'module' object")],
         raw=PICKLE_SESSION_RAW,
     )
     assert pm.triage(report) == "code_bug"
@@ -536,9 +540,7 @@ def test_reflect_diagnoses_session_default_argument_without_llm():
     report = TestReport(
         passed=0,
         failed=9,
-        failures=[
-            TestFailure(name="t", error="TypeError: cannot pickle 'module' object")
-        ],
+        failures=[TestFailure(name="t", error="TypeError: cannot pickle 'module' object")],
         raw=PICKLE_SESSION_RAW,
     )
     text = developer.reflect(report)
@@ -565,9 +567,7 @@ def test_reviewer_blocks_session_as_handler_default():
         entry_attr="app",
     )
     spec = ApiSpec(openapi_yaml="x", entrypoint="main.py", files=["main.py"])
-    comments = reviewer._api_checks(
-        code, spec, TestSuite(files={}), TestReport(passed=0, failed=0)
-    )
+    comments = reviewer._api_checks(code, spec, TestSuite(files={}), TestReport(passed=0, failed=0))
     blockers = [c for c in comments if c.severity == "blocker"]
     assert any("Depends(get_db)" in c.message for c in blockers)
 
@@ -591,9 +591,7 @@ def test_reviewer_allows_depends_injected_session():
         entry_attr="app",
     )
     spec = ApiSpec(openapi_yaml="x", entrypoint="main.py", files=["main.py"])
-    comments = reviewer._api_checks(
-        code, spec, TestSuite(files={}), TestReport(passed=0, failed=0)
-    )
+    comments = reviewer._api_checks(code, spec, TestSuite(files={}), TestReport(passed=0, failed=0))
     assert not [c for c in comments if "default argument" in c.message]
 
 

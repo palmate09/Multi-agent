@@ -265,4 +265,6 @@ def describe(spec: ApiSpec, requirement: str) -> str:
             f"{kind_hint(requirement)}; entrypoint={spec.entrypoint}; "
             f"public_api={spec.public_api[:4]}"
         )
-    return f"{kind_hint(requirement)}; endpoints={len(spec.endpoints)}; entrypoint={spec.entrypoint}"
+    return (
+        f"{kind_hint(requirement)}; endpoints={len(spec.endpoints)}; entrypoint={spec.entrypoint}"
+    )

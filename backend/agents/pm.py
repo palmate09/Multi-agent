@@ -127,9 +127,7 @@ _TEST_COLLECTION_ERROR = re.compile(
 
 # A test that patches a symbol the implementation never imports or calls, so the
 # patch silently does nothing and the assertion fails on unchanged state.
-_PATCHED_BUT_NO_EFFECT = re.compile(
-    r"assert\s+\d+\s*==\s*\d+", re.I
-)
+_PATCHED_BUT_NO_EFFECT = re.compile(r"assert\s+\d+\s*==\s*\d+", re.I)
 
 # Softer hints the LLM may still overrule.
 _WEAK_TEST_BUG = (
@@ -184,9 +182,7 @@ def triage(report: TestReport) -> str:
     # The raw output matters: a suite that fails to even be collected reports
     # no individual failures, so a blob built from them alone is empty.
     blob = (
-        " ".join(f.name + " " + f.error for f in report.failures)
-        + " "
-        + (report.raw or "")
+        " ".join(f.name + " " + f.error for f in report.failures) + " " + (report.raw or "")
     ).lower()
 
     # Only meaningful when other tests pass. A suite failing everywhere is a

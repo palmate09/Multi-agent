@@ -51,7 +51,7 @@ _PROGRAM_SOP = (
     "needed, and list them in a requirements.txt block.\n"
     "- If the program is a game, model the rules properly: state, turns, win conditions "
     "and legal moves belong in real data structures, not in a web request handler.\n"
-    "- Guard the runnable entry point with `if __name__ == \"__main__\":` so importing "
+    '- Guard the runnable entry point with `if __name__ == "__main__":` so importing '
     "the module has no side effects.\n"
     "- Import every symbol you use; do not reference an undefined name.\n"
     "- Do NOT import fastapi, flask, django, or any web framework. Do NOT create an "
@@ -74,7 +74,9 @@ def _file_plan_block(spec: ApiSpec) -> tuple[list[str], str]:
     return names, plan
 
 
-def _finish(files: dict[str, str], required: list[str], entrypoint: str = "", kind: str = "api") -> CodeBundle:
+def _finish(
+    files: dict[str, str], required: list[str], entrypoint: str = "", kind: str = "api"
+) -> CodeBundle:
     """Trim to the planned files and resolve the entrypoint from the code.
 
     Files outside the plan are dropped: a model that appends a stray scratch
@@ -147,8 +149,7 @@ def _api_to_code(spec: ApiSpec, plan: Plan | None = None) -> CodeBundle:
     prompt = (
         f"OpenAPI spec:\n{spec.openapi_yaml[:6000]}\n\n"
         f"Files to create (exactly these):\n{plan_text}\n"
-        f"Entrypoint module: {required[0]}\n"
-        + plan_block(plan)
+        f"Entrypoint module: {required[0]}\n" + plan_block(plan)
     )
     text, _meta = require(
         f"{prompt}Emit the file blocks.",
@@ -357,8 +358,7 @@ def patch_code(
     try:
         text, _meta = require(
             f"Reflection: {reflection}\n\nFailing tests:\n{failures}\n{trace_block}\n"
-            f"Current code:\n{current}{test_block}\n\n"
-            + tail,
+            f"Current code:\n{current}{test_block}\n\n" + tail,
             (_PROGRAM_SOP if kind == "program" else SOP).format(
                 file_plan="\n- " + "\n- ".join(sorted(code.files)),
                 entrypoint=code.entry_module or "",

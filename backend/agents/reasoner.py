@@ -86,9 +86,7 @@ def plan(requirement: str, stories: UserStories | None = None) -> Plan:
         prompt += f"\nStories:\n{listing}\n"
     for attempt in range(3):
         extra = "\nReply with the json block only." if attempt else ""
-        text, _meta = require(
-            f"{prompt}{extra}Output the json block.", SOP, role="reasoner"
-        )
+        text, _meta = require(f"{prompt}{extra}Output the json block.", SOP, role="reasoner")
         parsed = _parse(text)
         if parsed is not None:
             return parsed
@@ -118,7 +116,5 @@ def plan_block(plan: Plan | None) -> str:
     if not sections:
         return ""
     return (
-        "\nReasoning plan (advisory; the contract is what counts):\n"
-        + "\n\n".join(sections)
-        + "\n"
+        "\nReasoning plan (advisory; the contract is what counts):\n" + "\n\n".join(sections) + "\n"
     )

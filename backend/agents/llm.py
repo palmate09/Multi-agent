@@ -451,9 +451,7 @@ def _openai_compat(
             # consumed before any visible output.
             finish = choice.get("finish_reason")
             why = ", reasoning consumed the budget" if reasoning else ""
-            raise ValueError(
-                f"empty content (finish_reason={finish}, max_tokens={budget}){why}"
-            )
+            raise ValueError(f"empty content (finish_reason={finish}, max_tokens={budget}){why}")
         if reasoning or inline:
             _LAST_REASONING.append(reasoning or inline)
         return answer
@@ -519,11 +517,7 @@ def _openrouter(prompt: str, system: str, timeout: int, role: str = "") -> str |
     ]
     if wants:
         pref = (os.getenv("OPENROUTER_REASONING_MODEL", "") or "").strip()
-        models = (
-            [pref]
-            if pref
-            else ["openai/gpt-oss-20b:free", "qwen/qwen3-32b:free"]
-        ) + models
+        models = ([pref] if pref else ["openai/gpt-oss-20b:free", "qwen/qwen3-32b:free"]) + models
     for m in _dedupe(models):
         text = _openai_compat(
             "https://openrouter.ai/api/v1/chat/completions",

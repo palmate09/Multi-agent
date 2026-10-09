@@ -152,7 +152,9 @@ def _declared_symbols_present(code: CodeBundle, names: list[str]) -> list[str]:
     return missing
 
 
-def _universal_checks(code: CodeBundle, tests: TestSuite, report: TestReport) -> list[ReviewComment]:
+def _universal_checks(
+    code: CodeBundle, tests: TestSuite, report: TestReport
+) -> list[ReviewComment]:
     """Checks that apply whatever the project is."""
     out: list[ReviewComment] = []
 
@@ -211,7 +213,12 @@ def _program_checks(code: CodeBundle, spec: ApiSpec, tests: TestSuite) -> list[R
         )
     # Coverage of declared behaviours, by name.
     stems = {f[:-3].split("/")[-1] for f in spec.files if f.endswith(".py")}
-    if stems and not any(re.search(rf"^\s*(?:import\s+{re.escape(s)}\b|from\s+{re.escape(s)}\s+import)", tests_body, re.M) for s in stems):
+    if stems and not any(
+        re.search(
+            rf"^\s*(?:import\s+{re.escape(s)}\b|from\s+{re.escape(s)}\s+import)", tests_body, re.M
+        )
+        for s in stems
+    ):
         out.append(
             ReviewComment(
                 severity="blocker",

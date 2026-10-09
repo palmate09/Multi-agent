@@ -60,7 +60,7 @@ _PROGRAM_SOP = (
     "- Access attributes directly when the contract does not list a getter (e.g. "
     "game.current_player, not game.get_current_player()).\n"
     "- Do NOT guess the internal shape of returned data. If the contract does not name a "
-    "field (e.g. a token's \"id\" key or a \"status\" field), do not index into it. Test "
+    'field (e.g. a token\'s "id" key or a "status" field), do not index into it. Test '
     "through the declared behaviours and public methods instead, or assert on values the "
     "methods themselves return.\n"
     "- Functions return plain Python values (ints, strings, lists, dicts, objects). Do NOT "
@@ -83,7 +83,6 @@ _PROGRAM_SOP = (
     "counts, ordering, and that illegal actions are rejected.\n"
     "Output ONE fenced ```python block containing only the test file. No prose."
 )
-
 
 
 _FABRICATES_APP = re.compile(r"=\s*(?:FastAPI|APIRouter)\s*\(", re.M)
@@ -129,7 +128,9 @@ def _api_tests(spec: ApiSpec, listing: str, entry_module: str, entry_attr: str) 
     if not entry_module:
         raise GenerationError("Tester needs the application entrypoint, which was not resolved")
     pairs, _paths = spec_paths(spec.openapi_yaml)
-    endpoint_list = "\n".join(f"- {m} {p}" for p, m in sorted(pairs)) or "(read from the spec below)"
+    endpoint_list = (
+        "\n".join(f"- {m} {p}" for p, m in sorted(pairs)) or "(read from the spec below)"
+    )
     codes = sorted(_status_codes_in_spec(spec.openapi_yaml))
     prompt = (
         f"Spec:\n{spec.openapi_yaml[:6000]}\n\n"
@@ -154,9 +155,7 @@ def _api_tests(spec: ApiSpec, listing: str, entry_module: str, entry_attr: str) 
     return TestSuite(files={"test_app.py": body})
 
 
-def _program_tests(
-    spec: ApiSpec, listing: str, code: CodeBundle | None = None
-) -> TestSuite:
+def _program_tests(spec: ApiSpec, listing: str, code: CodeBundle | None = None) -> TestSuite:
     """Tests for a self-contained program: import the public names and assert."""
     if not spec.public_api:
         raise GenerationError("Tester needs a declared public interface to import")
@@ -216,6 +215,10 @@ def _imports_public_api(body: str, spec: ApiSpec) -> bool:
         if f.endswith(".py") and Path(f).stem not in {"__init__", "requirements"}
     }
     for module in modules:
-        if re.search(rf"^\s*(?:import\s+{re.escape(module)}\b|from\s+{re.escape(module)}\s+import)", body, re.M):
+        if re.search(
+            rf"^\s*(?:import\s+{re.escape(module)}\b|from\s+{re.escape(module)}\s+import)",
+            body,
+            re.M,
+        ):
             return True
     return False
