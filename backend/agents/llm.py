@@ -932,12 +932,20 @@ def generate(
     if not text and not skip_local:
         local_model = role_model(role)
         if _ollama_available(local_model):
+            # The shared timeout is sized for hosted calls (120s). CPU
+            # inference needs far longer (a 4000-token developer answer at
+            # ~12 tok/s takes ~5 minutes), so the local attempt gets its own
+            # ceiling. Without this a groq->ollama fallback always timed out.
+            try:
+                local_timeout = int(os.getenv("OLLAMA_TIMEOUT", "") or 0) or timeout
+            except ValueError:
+                local_timeout = timeout
             text = _ollama(
                 prompt,
                 system,
                 local_model,
                 num_predict=role_num_predict(role),
-                timeout=timeout,
+                timeout=local_timeout,
                 role=role,
             )
             captured, tokens = _take_reasoning()

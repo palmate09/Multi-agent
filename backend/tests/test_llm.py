@@ -700,3 +700,99 @@ def test_cached_call_reports_no_reasoning(monkeypatch):
     assert second["reasoning"] == ""
     assert second["reasoning_tokens"] == 0
     assert first["reasoning"] == ""
+
+
+# ------------------------------------------------- groq -> ollama fallback --
+def _rig_ollama_present(monkeypatch, model="qwen2.5-coder:3b"):
+    """Pretend this Ollama model is pulled, without touching the network."""
+    monkeypatch.delenv("AGENT_TEAM_TESTING", raising=False)
+    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
+    monkeypatch.delenv("OLLAMA_MODEL_DEVELOPER", raising=False)
+    llm._OLLAMA_OK["probed"] = True
+    llm._OLLAMA_OK["models"] = {model}
+
+
+def _unrig_ollama():
+    llm._OLLAMA_OK["probed"] = False
+    llm._OLLAMA_OK["models"] = set()
+    llm.set_run_scope("")
+    llm.CACHE.clear()
+
+
+def test_cloud_failure_falls_back_to_ollama(monkeypatch):
+    """Groq exhausted (429) -> the loaded Ollama answers instead of ok=False."""
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    monkeypatch.setenv("SKIP_OLLAMA", "0")
+    monkeypatch.setenv("PREFER_LOCAL_ONLY", "0")
+    _rig_ollama_present(monkeypatch)
+    llm.CACHE.clear()
+    llm.set_run_scope("fallback-test")
+
+    def no_cloud(prompt, system, timeout, role=""):
+        llm._note_failure("groq/qwen/qwen3.8-27b", "HTTP 429 rate limit exceeded")
+        return None
+
+    monkeypatch.setattr(llm, "_groq", no_cloud)
+    monkeypatch.setattr(llm, "_ollama", lambda *a, **k: "from ollama")
+
+    try:
+        text, meta = llm.generate("fall back please", role="developer")
+    finally:
+        _unrig_ollama()
+    assert text == "from ollama"
+    assert meta["ok"] is True
+    assert meta["model"] == "ollama/qwen2.5-coder:3b"
+    assert any("groq" in f for f in meta["failures"]), "the groq 429 must be logged"
+
+
+def test_ollama_fallback_attempt_uses_ollama_timeout(monkeypatch):
+    """LLM_TIMEOUT is sized for hosted calls; the CPU attempt needs OLLAMA_TIMEOUT."""
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("LLM_TIMEOUT", "120")
+    monkeypatch.setenv("OLLAMA_TIMEOUT", "600")
+    monkeypatch.setenv("SKIP_OLLAMA", "0")
+    monkeypatch.setenv("PREFER_LOCAL_ONLY", "0")
+    _rig_ollama_present(monkeypatch)
+    llm.CACHE.clear()
+    llm.set_run_scope("fallback-timeout")
+
+    monkeypatch.setattr(llm, "_groq", lambda *a, **k: None)
+    seen = {}
+
+    def fake_ollama(prompt, system, model, num_predict, timeout, role=""):
+        seen["timeout"] = timeout
+        return "ok"
+
+    monkeypatch.setattr(llm, "_ollama", fake_ollama)
+    try:
+        text, _meta = llm.generate("timeout check", role="developer")
+    finally:
+        _unrig_ollama()
+    assert text == "ok"
+    assert seen["timeout"] == 600
+
+
+def test_skip_ollama_disables_the_cloud_fallback(monkeypatch):
+    """SKIP_OLLAMA=1 is the switch that keeps a hosted run hosted-only."""
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("SKIP_OLLAMA", "1")
+    monkeypatch.setenv("PREFER_LOCAL_ONLY", "0")
+    llm.CACHE.clear()
+    llm.set_run_scope("no-fallback")
+
+    monkeypatch.setattr(llm, "_groq", lambda *a, **k: None)
+    called = []
+
+    def spy_ollama(*a, **k):
+        called.append(True)
+        return "must not be used"
+
+    monkeypatch.setattr(llm, "_ollama", spy_ollama)
+    try:
+        text, meta = llm.generate("stay on groq", role="developer")
+    finally:
+        _unrig_ollama()
+    assert text == ""
+    assert meta["ok"] is False
+    assert not called, "ollama was contacted despite SKIP_OLLAMA=1"
