@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     # declared crashed. Generated apps do a create_all at import, so this is
     # generous on purpose.
     preview_boot_timeout_seconds: int = 30
+    # How often the TTL reaper scans for idle or dead previews.
+    preview_reap_interval: int = 15
     # Whether the API may start a preview at all. On by default outside
     # production so a developer can just click it; production has to opt in,
     # because there it means executing generated code on the server.

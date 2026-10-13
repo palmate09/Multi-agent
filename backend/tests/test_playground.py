@@ -165,6 +165,67 @@ def test_a_missing_run_directory_is_refused(service):
         service.start("no-such-run")
 
 
+def test_reaper_thread_actually_ticks(service, run_dir, monkeypatch):
+    """The reaper must run as a thread, not only when reap() is called by hand.
+
+    Every other TTL test calls ``service.reap()`` directly, so none of them
+    exercise ``_reap_loop`` — which shipped calling a method that no longer
+    existed, so the thread raised AttributeError on its first tick and died.
+    Nothing reaped idle previews and nothing logged an error. This drives a
+    real tick.
+    """
+    session = _wait_running(service, "run-1")
+    session.last_hit = time.time() - 10_000  # expired, but nobody is polling
+    svc = PlaygroundService(
+        Settings(
+            runs_dir=service.runs_dir,
+            preview_boot_timeout_seconds=25,
+            preview_reap_interval=1,
+        ),
+        runs_dir=service.runs_dir,
+    )
+    svc._sessions = service._sessions  # share state with the session above
+    svc.start_reaper()
+    try:
+        deadline = time.time() + 15
+        while time.time() < deadline and svc._sessions:
+            time.sleep(0.25)
+        assert not svc._sessions, "the reaper thread never ran"
+        assert not session.alive(), "the expired preview's process is still up"
+    finally:
+        svc.shutdown()
+
+
+def test_reaper_thread_survives_a_failing_tick(service, run_dir, monkeypatch):
+    """One bad tick must not silently end reaping for the life of the process."""
+    svc = PlaygroundService(
+        Settings(
+            runs_dir=service.runs_dir,
+            preview_boot_timeout_seconds=25,
+            preview_reap_interval=1,
+        ),
+        runs_dir=service.runs_dir,
+    )
+    calls = {"n": 0}
+    real = svc.reap
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        return real()
+
+    monkeypatch.setattr(svc, "reap", flaky)
+    svc.start_reaper()
+    try:
+        deadline = time.time() + 15
+        while time.time() < deadline and calls["n"] < 3:
+            time.sleep(0.25)
+        assert calls["n"] >= 3, f"reaper stopped after {calls['n']} tick(s)"
+    finally:
+        svc.shutdown()
+
+
 def test_status_of_an_unknown_run_is_stopped(service):
     status = service.status("nothing")
     assert status["state"] == "stopped"

@@ -172,6 +172,9 @@ class PlaygroundService:
         # Dot-prefixed so rehydrate() (which scans runs_dir) and the artifact
         # listing never mistake a working directory for a run.
         self.root = root / ".preview"
+        # Short, and overridable so a test can drive a real tick without
+        # sleeping 15 seconds.
+        self._reap_interval = float(getattr(settings, "preview_reap_interval", 15) or 15)
         self._sessions: dict[str, PreviewSession] = {}
         self._lock = threading.RLock()
         self._reaper: threading.Thread | None = None
@@ -186,6 +189,7 @@ class PlaygroundService:
             target=self._reap_loop, name="playground-reaper", daemon=True
         )
         self._reaper.start()
+        log.info("playground reaper started (every %ss)", self._reap_interval)
 
     def shutdown(self) -> None:
         """Stop the reaper and kill every child. Called from the app lifespan."""
@@ -480,8 +484,14 @@ class PlaygroundService:
                 proc.wait(timeout=2)
 
     def _reap_loop(self) -> None:
-        while not self._stop.wait(15.0):
-            self._reap_once()
+        while not self._stop.wait(self._reap_interval):
+            try:
+                self.reap()
+            except Exception:  # the reaper must outlive one bad tick
+                # A raising reaper silently stops reaping, and nothing else
+                # would notice: previews would hold their ports until the
+                # process restarts. Log and keep the loop alive instead.
+                log.exception("preview reaper tick failed; continuing")
 
     def reap(self) -> int:
         """Expire idle and dead previews now. Returns how many were reaped."""
