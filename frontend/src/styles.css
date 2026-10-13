@@ -524,6 +524,25 @@ td.num {
   text-align: right;
 }
 
+/* Pass/fail cells in the UI gate table. Same colour language as .badge.*, so
+   a verdict reads the same wherever it appears. */
+td.pass,
+td.fail {
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+td.pass {
+  color: #6ee7b7;
+}
+
+td.fail {
+  color: #fca5a5;
+}
+
 /* ---------- stories ---------- */
 
 .story {

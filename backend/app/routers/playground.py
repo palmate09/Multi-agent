@@ -95,10 +95,17 @@ def playground_stop(
 
 @router.api_route(
     "/preview/{run_id}/{path:path}",
+    # Both routes are excluded from the OpenAPI schema: /preview is a
+    # browser-facing proxy, not an API to document, and stacking the two
+    # decorators on one function otherwise gives them the same generated
+    # operation id, which collides in /api/docs and warns on every startup.
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+    include_in_schema=False,
 )
 @router.api_route(
-    "/preview/{run_id}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+    "/preview/{run_id}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+    include_in_schema=False,
 )
 async def preview_proxy(
     run_id: str,
