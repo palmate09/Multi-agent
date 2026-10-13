@@ -25,6 +25,9 @@ class RunCreate(BaseModel):
     # Ablate the plan-then-act node, for comparing a run against the old
     # straight-to-design behaviour.
     skip_reasoner: bool = False
+    # Also generate a static web UI for the API. Off by default so a plain API
+    # run costs exactly what it cost before and acceptance numbers are untouched.
+    ui: bool = False
     use_docker: bool | None = None
     run_id: str | None = Field(default=None, max_length=64)
 
@@ -66,6 +69,10 @@ class RunDetail(RunSummary):
     # Domain coverage verdict: which requirement terms the code reflects.
     coverage: dict[str, Any] | None = None
     memory: list[str] = Field(default_factory=list)
+    # ---- full-stack half (absent unless the run asked for a UI) ----
+    ui: dict[str, Any] | None = None
+    ui_code: dict[str, str] = Field(default_factory=dict)
+    ui_report: dict[str, Any] | None = None
 
 
 class LlmStatus(BaseModel):

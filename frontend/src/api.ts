@@ -1,6 +1,7 @@
 import type {
   EvalResults,
   Health,
+  PreviewStatus,
   RunDetail,
   RunSummary,
   SessionInfo,
@@ -98,6 +99,8 @@ export const api = {
     skip_tester?: boolean;
     skip_reviewer?: boolean;
     skip_reasoner?: boolean;
+    /** Also generate a static web UI for the generated API. */
+    ui?: boolean;
   }) =>
     request<RunSummary>("/api/runs", {
       method: "POST",
@@ -124,6 +127,22 @@ export const api = {
       method: "POST",
       body: JSON.stringify({}),
     }),
+
+  previewStatus: (runId: string) =>
+    request<PreviewStatus>(`/api/runs/${runId}/playground`),
+
+  /** Start (or restart) the run's preview. Idempotent when already running. */
+  startPreview: (runId: string) =>
+    request<PreviewStatus>(`/api/runs/${runId}/playground/start`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+
+  stopPreview: (runId: string) =>
+    request<{ run_id: string; stopped: boolean; state: string }>(
+      `/api/runs/${runId}/playground/stop`,
+      { method: "POST", body: JSON.stringify({}) }
+    ),
 
   evals: () => request<EvalResults>("/api/evals/results"),
 };

@@ -15,14 +15,6 @@
 :80 {
 	encode zstd gzip
 
-	header {
-		Strict-Transport-Security "max-age=0"
-		X-Content-Type-Options "nosniff"
-		X-Frame-Options "DENY"
-		Referrer-Policy "no-referrer"
-		-Server
-	}
-
 	log {
 		output stdout
 		format console
@@ -33,8 +25,27 @@
 		flush_interval -1
 	}
 
-	header {
+	# Two mutually exclusive header blocks rather than a site-wide one plus an
+	# override for /preview. Caddy runs `header` before `reverse_proxy`, and
+	# when two blocks set the same key which one wins is not something to rely
+	# on: the site-wide DENY first, the preview SAMEORIGIN "after" it, and the
+	# preview iframe still arrived with DENY. Splitting on `path` makes each
+	# request match exactly one block, so there is nothing to order.
+	@preview path /preview/*
+	header @preview {
 		Strict-Transport-Security "max-age=0"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	@site not path /preview/*
+	header @site {
+		Strict-Transport-Security "max-age=0"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
 		-Server
 	}
 }

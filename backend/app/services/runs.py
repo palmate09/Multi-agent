@@ -158,6 +158,9 @@ class Run:
             data["coverage"] = st.coverage.model_dump() if st.coverage else None
             data["memory"] = list(st.memory)
             data["plan"] = st.plan.model_dump() if st.plan else None
+            data["ui"] = st.ui_spec.model_dump() if st.ui_spec else None
+            data["ui_code"] = dict(st.ui_code.files) if st.ui_code else {}
+            data["ui_report"] = st.ui_report.model_dump() if st.ui_report else None
         else:
             data.update(self._artifacts_from_disk())
         return data
@@ -173,6 +176,9 @@ class Run:
             "coverage": None,
             "memory": [],
             "plan": None,
+            "ui": None,
+            "ui_code": {},
+            "ui_report": None,
         }
         if not self.run_dir.exists():
             return out
@@ -183,10 +189,11 @@ class Run:
         spec = self.run_dir / "spec.yaml"
         if spec.exists():
             out["spec"] = spec.read_text()
-        for sub in ("code", "tests"):
+        for sub in ("code", "tests", "ui"):
             root = self.run_dir / sub
             if root.exists():
-                out[sub] = {
+                key = "ui_code" if sub == "ui" else sub
+                out[key] = {
                     str(p.relative_to(root)): p.read_text()
                     for p in sorted(root.rglob("*"))
                     if p.is_file()
@@ -211,6 +218,11 @@ class Run:
         if plan.exists():
             with contextlib.suppress(json.JSONDecodeError):
                 out["plan"] = json.loads(plan.read_text())
+        for name, key in (("ui_contract.json", "ui"), ("ui_report.json", "ui_report")):
+            artifact = self.run_dir / name
+            if artifact.exists():
+                with contextlib.suppress(json.JSONDecodeError):
+                    out[key] = json.loads(artifact.read_text())
         return out
 
     def list_artifacts(self) -> list[str]:
@@ -298,6 +310,10 @@ class RunStore:
         Deleting under a running thread would orphan it: it keeps its pool
         slot, keeps burning LLM quota, and recreates files in the deleted
         directory. Callers must stop() first.
+
+        Any live preview is stopped first. It holds a port and a copy of the
+        code in a working directory derived from this one; leaving it running
+        would serve a run the user believes no longer exists.
         """
         with self._lock:
             run = self._runs.get(run_id)
@@ -306,6 +322,10 @@ class RunStore:
             if run.status in ("queued", "running", "stopping"):
                 raise RunningError(run_id, run.status)
             del self._runs[run_id]
+        from app.services.playground import get_playground
+
+        with contextlib.suppress(Exception):
+            get_playground().stop(run_id)
         import shutil
 
         shutil.rmtree(run.run_dir, ignore_errors=True)
@@ -433,6 +453,7 @@ class RunStore:
                 skip_tester=bool(run.options.get("skip_tester")),
                 skip_reviewer=bool(run.options.get("skip_reviewer")),
                 skip_reasoner=bool(run.options.get("skip_reasoner")),
+                want_ui=bool(run.options.get("ui")),
                 on_event=run.emit,
                 run_id=run.run_id,
                 cancel=run.cancel_event,

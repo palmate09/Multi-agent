@@ -49,6 +49,7 @@ def create_run(
         skip_tester=payload.skip_tester,
         skip_reviewer=payload.skip_reviewer,
         skip_reasoner=payload.skip_reasoner,
+        ui=payload.ui,
         use_docker=payload.use_docker,
     )
     store.submit(run)

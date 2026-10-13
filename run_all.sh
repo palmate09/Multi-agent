@@ -142,11 +142,22 @@ if [ "$USE_LLM" -eq 1 ]; then
   if [ "$QUICK" -eq 0 ]; then
     step "Phase 5: full eval suite" $PY cli.py --eval
   fi
+
+  step "Phase 6: full-stack UI generation" \
+    $PY cli.py --run "Build a REST API for a recipe collection. GET /health, GET /recipes, POST /recipes with title required (422 on empty), 404 on unknown id." \
+    --out outputs/verify_fullstack --ui --live $DOCKER_FLAG
+
+  step "Phase 6: UI gate + resume (offline)" \
+    $PY -m pytest -q backend/tests/test_ui_gate.py backend/tests/test_ui_workflow.py
+
+  step "Phase 6: playground boot + proxy" \
+    $PY -m pytest -q backend/tests/test_playground.py
 else
   skip "Phase 2/3: novel-domain generation"
   skip "Phase 0: single-agent baseline"
   skip "Phase 5: ablations"
   skip "Phase 5: full eval suite"
+  skip "Phase 6: full-stack UI generation"
 fi
 
 echo ""
@@ -165,6 +176,11 @@ done
 echo ""
 echo "Review findings (read these, they are not gates):"
 for f in outputs/verify_library/review.json outputs/verify_library/ruff.txt outputs/verify_library/bandit.txt; do
+  [ -f "$f" ] && echo "  $f"
+done
+echo ""
+echo "UI artifacts (advisory; these never gate the run's status):"
+for f in outputs/verify_fullstack/ui_contract.json outputs/verify_fullstack/ui_report.json; do
   [ -f "$f" ] && echo "  $f"
 done
 

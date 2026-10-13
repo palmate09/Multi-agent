@@ -9,7 +9,7 @@ const EXAMPLES = [
 interface Props {
   onSubmit: (
     requirement: string,
-    opts: { skipTester: boolean; skipReviewer: boolean; skipReasoner: boolean }
+    opts: { skipTester: boolean; skipReviewer: boolean; skipReasoner: boolean; ui: boolean }
   ) => void;
   busy: boolean;
   error: string | null;
@@ -20,6 +20,7 @@ export function RequirementForm({ onSubmit, busy, error }: Props) {
   const [skipTester, setSkipTester] = useState(false);
   const [skipReviewer, setSkipReviewer] = useState(false);
   const [skipReasoner, setSkipReasoner] = useState(false);
+  const [ui, setUi] = useState(false);
 
   const valid = text.trim().length >= 10;
 
@@ -61,13 +62,17 @@ export function RequirementForm({ onSubmit, busy, error }: Props) {
           />
           Ablate reviewer
         </label>
+        <label className="check" title="Also generate a static web UI bound to the API">
+          <input type="checkbox" checked={ui} onChange={(e) => setUi(e.target.checked)} />
+          Generate a web UI
+        </label>
       </div>
       {error && <div className="alert error">{error}</div>}
       <div className="row">
         <button
           className="primary"
           disabled={!valid || busy}
-          onClick={() => onSubmit(text.trim(), { skipTester, skipReviewer, skipReasoner })}
+          onClick={() => onSubmit(text.trim(), { skipTester, skipReviewer, skipReasoner, ui })}
         >
           {busy ? "Starting…" : "Run pipeline"}
         </button>

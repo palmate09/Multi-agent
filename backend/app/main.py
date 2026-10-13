@@ -14,7 +14,8 @@ from fastapi.responses import JSONResponse
 from app import auth
 from app.config import get_settings
 from app.routers import auth as auth_router
-from app.routers import evals, health, runs
+from app.routers import evals, health, playground, runs
+from app.services.playground import get_playground
 from app.services.runs import RunStore
 
 LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s %(message)s"
@@ -30,6 +31,11 @@ PUBLIC_PATHS = frozenset(
         "/api/auth/me",
     }
 )
+
+#: The live-preview proxy. It is NOT in PUBLIC_PATHS: an open /preview would be
+#: an open reverse proxy onto whatever a user can make this host spawn. It stays
+#: authenticated like everything else.
+PREVIEW_PREFIX = "/preview/"
 
 
 def configure_logging(level: str) -> None:
@@ -52,15 +58,20 @@ async def lifespan(app: FastAPI):
     cfg = auth.get_auth_config()
     store = RunStore(settings)
     restored = store.rehydrate()
+    # Created here, not lazily, so a preview process is always torn down by the
+    # same shutdown that stops the run workers.
+    previews = get_playground()
     app.state.settings = settings
     app.state.store = store
+    app.state.playground = previews
     logging.getLogger("app").info(
-        "started env=%s runs_dir=%s restored=%d auth=%s user=%s",
+        "started env=%s runs_dir=%s restored=%d auth=%s user=%s previews=%s",
         settings.environment,
         settings.runs_dir,
         restored,
         "on" if cfg.enabled else "OFF",
         cfg.username if cfg.enabled else "-",
+        "allowed" if settings.previews_enabled else "blocked",
     )
     if not cfg.enabled:
         logging.getLogger("app").warning(
@@ -69,6 +80,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        previews.shutdown()
         store.shutdown()
         logging.getLogger("app").info("shutdown complete")
 
@@ -103,6 +115,15 @@ def create_app() -> FastAPI:
 
         Middleware rather than per-router dependencies so that a route added
         later is protected by default instead of silently shipping open.
+
+        ``/preview/*`` is authenticated like everything else but exempt from
+        the CSRF check: the caller there is the SPA's <iframe> loading a
+        sandboxed *generated* app, not a browser form posting to the platform
+        API. That app has no way to read the platform's CSRF cookie, and the
+        session cookie is SameSite=strict, so a cross-site POST still cannot be
+        forged -- the app is loopback-only and the proxy resolves the target
+        server-side, so the blast radius is one already-authenticated user's own
+        preview process.
         """
         cfg = auth.get_auth_config()
         if not cfg.enabled:
@@ -126,6 +147,7 @@ def create_app() -> FastAPI:
             cfg.require_csrf
             and user != "api-key"
             and request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and not path.startswith(PREVIEW_PREFIX)
         ):
             header = request.headers.get(auth.CSRF_HEADER)
             cookie = request.cookies.get(auth.CSRF_COOKIE)
@@ -141,6 +163,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router.router)
     app.include_router(runs.router)
     app.include_router(evals.router)
+    app.include_router(playground.router)
 
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception) -> JSONResponse:

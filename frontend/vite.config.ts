@@ -3,6 +3,9 @@ import react from "@vitejs/plugin-react";
 
 // In dev the Vite server proxies /api to the backend so the browser sees a
 // single origin and we never have to deal with CORS during development.
+// /preview goes to the same place: the generated app is served by the backend's
+// gateway, and the SPA iframe must reach it on the same origin for the session
+// cookie to ride along.
 const BACKEND = process.env.VITE_BACKEND_URL ?? "http://localhost:8000";
 
 export default defineConfig({
@@ -13,6 +16,7 @@ export default defineConfig({
     proxy: {
       "/api": { target: BACKEND, changeOrigin: true },
       "/health": { target: BACKEND, changeOrigin: true },
+      "/preview": { target: BACKEND, changeOrigin: true },
     },
   },
   build: {

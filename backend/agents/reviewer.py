@@ -18,7 +18,16 @@ from agents.introspect import (
     uncovered_spec_endpoints,
 )
 from agents.llm import GenerationError, generate
-from schemas.messages import ApiSpec, CodeBundle, ReviewComment, ReviewReport, TestReport, TestSuite
+from schemas.messages import (
+    ApiSpec,
+    CodeBundle,
+    ReviewComment,
+    ReviewReport,
+    TestReport,
+    TestSuite,
+    UiReport,
+    UiSpec,
+)
 
 # Patterns that are unsafe in any domain.
 _UNSAFE = re.compile(
@@ -357,6 +366,46 @@ def _api_checks(
     return out
 
 
+def _ui_checks(
+    ui_spec: UiSpec | None, ui_code: CodeBundle | None, ui_report: UiReport | None
+) -> list[ReviewComment]:
+    """Surface the UI gate's verdict in the review, always as ``minor``.
+
+    The gate owns the verdict (``ui_report.ok``); this only restates each failed
+    check so it is visible where the user already looks. Severity is pinned to
+    ``minor`` — a UI problem must never gate acceptance of a tested backend.
+    """
+    out: list[ReviewComment] = []
+    if ui_report is not None:
+        for check in ui_report.checks:
+            if check.ok:
+                continue
+            out.append(
+                ReviewComment(
+                    severity="minor",
+                    message=f"UI gate {check.name}: {check.detail}",
+                    location=f"ui/{check.name}",
+                )
+            )
+    if ui_code is not None and not ui_code.files.get("index.html", "").strip():
+        out.append(
+            ReviewComment(
+                severity="minor",
+                message="UI bundle has no index.html; the preview will not load",
+                location="ui/index.html",
+            )
+        )
+    if ui_spec is not None and not ui_spec.data_bindings:
+        out.append(
+            ReviewComment(
+                severity="minor",
+                message="UI contract declares no data bindings; the page shows no data",
+                location="ui/contract",
+            )
+        )
+    return out
+
+
 def _declared_codes(spec_yaml: str) -> set[str]:
     """Status codes the spec declares, across every operation."""
     return declared_status_codes(spec_yaml)
@@ -376,6 +425,9 @@ def review(
     report: TestReport,
     ruff_out: str = "",
     bandit_out: str = "",
+    ui_spec: UiSpec | None = None,
+    ui_code: CodeBundle | None = None,
+    ui_report: UiReport | None = None,
 ) -> ReviewReport:
     """Static findings first, then the LLM may add to them.
 
@@ -383,8 +435,14 @@ def review(
     static pass came back empty, which is how it could never contribute before.
     Its suggestions are advisory (major at most) unless a static check
     corroborates them.
+
+    The UI findings are folded in at ``minor`` and are deliberately **never**
+    blockers: the backend is tested and independently reviewed, and a 3b model
+    producing a mediocre page must not turn that green run into a failure. The
+    full UI verdict lives in ``ui_report.json``.
     """
     comments = _static_checks(code, spec, tests, report)
+    comments += _ui_checks(ui_spec, ui_code, ui_report)
 
     if "E9" in ruff_out or "F821" in ruff_out or "SyntaxError" in (report.raw or ""):
         comments.append(

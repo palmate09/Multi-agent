@@ -1,6 +1,7 @@
 # Multi-Agent Software Team
 
-5 LLM agents turn plain English into a tested, reviewed FastAPI REST API.
+5 LLM agents turn plain English into a tested, reviewed FastAPI REST API — and,
+if you ask, a static web UI for it that you can click on and use.
 
 Bring your own model: a Gemini API key (a run takes 1-2 minutes) or local
 Ollama (free and private, but 3-6 minutes on CPU). There is **no template
@@ -8,8 +9,9 @@ fallback** — if generation fails the run reports `blocked` and says why, rathe
 than quietly substituting a built-in answer.
 
 Ships with a web UI (React + Vite behind nginx), a FastAPI backend that streams
-agent progress over SSE, Docker images for both, and a CI/CD pipeline that
-deploys to a GCP VM.
+agent progress over SSE, a live playground that boots the generated app and
+serves it at `/preview/<run_id>/`, Docker images for both, and a CI/CD pipeline
+that deploys to a GCP VM.
 
 ## Architecture
 
@@ -17,12 +19,15 @@ deploys to a GCP VM.
 Requirement -> PM (stories) -> Reasoner (plan: approach/risks/edge cases)
   -> Designer (OpenAPI + file plan) -> Developer
   -> domain coverage gate -> boot check -> Tester || (developer self-checks)
-  -> Sandbox Runner -> triage+reflection -> Developer -> Reviewer (ruff+bandit) -> done
+  -> Sandbox Runner -> triage+reflection -> Developer
+  -> UI designer -> UI developer -> UI gate (advisory)      [opt-in]
+  -> Reviewer (ruff+bandit) -> done
 ```
 
 ```
-browser ──> Caddy ──> nginx (SPA + /api proxy) ──> FastAPI ──> agents
-                                                           └──> pytest sandbox
+browser ──> Caddy ──> nginx (SPA + /api + /preview proxy) ──> FastAPI ──> agents
+                                                                ├──> pytest sandbox
+                                                                └──> preview: uvicorn on 127.0.0.1
 ```
 
 See `ARCHITECTURE.md`, `EXECUTION_PLAN.md`, `docs/DEPLOY.md`. Original brief: `docs/`.
@@ -130,6 +135,46 @@ single module, while a larger one gets `models.py`, `schemas_pyd.py` and routers
 The entrypoint is **discovered from the code** by AST inspection
 (`agents/introspect.py`) rather than assumed to be `main.py`, so `app.py`,
 `server.py` and nested packages all work.
+
+## Full-stack runs and the playground
+
+Tick **Generate a web UI** (or pass `--ui`) to add three nodes after the
+backend tests are green:
+
+```
+ui_designer -> ui_developer -> ui_gate
+```
+
+They emit a **static, no-build** UI — `index.html`, `app.js`, `styles.css` —
+bound to the endpoints the generated API actually declares. There is no React,
+no npm and no bundler in the loop.
+
+Two things are checked rather than merely requested:
+
+* **Relative URLs.** The UI is served at `/preview/<run_id>/`, so
+  `fetch('/books')` would hit the *platform's* API instead of the sandboxed one.
+* **No external origins.** The preview sandbox has no network, so a CDN link
+  renders a half-styled page.
+
+The gate's verdict is **advisory**: a broken UI is reported on the UI tab and
+folded into the review as `minor` findings, but it never changes the run's
+terminal status. A green, tested, reviewed backend run stays green.
+
+Then the **Playground** tab boots the generated app as a real uvicorn
+subprocess on a loopback port and reverse-proxies it at `/preview/<run_id>/`:
+
+```
+GET  /api/runs/{rid}/playground         -> {state, url, port, error, log_tail}
+POST /api/runs/{rid}/playground/start   -> 202, idempotent
+POST /api/runs/{rid}/playground/stop
+ANY  /preview/{rid}/{path:path}         -> reverse proxy
+```
+
+> **The playground is not isolation.** It is a normal process on the server
+> host. Platform credentials are stripped from its environment, it binds
+> `127.0.0.1`, and an idle TTL plus a concurrency cap bound how long and how
+> many — but it is not a jail. On a machine you care about, put Docker or a VM
+> in front of it. `PREVIEW_ALLOW_START` is off by default in production.
 
 ## Choosing a backend
 
@@ -286,9 +331,12 @@ run_all.sh   run every phase gate in order
 * The coverage gate is lexical. It proves the domain vocabulary is present, not
   that the behaviour is correct — the tests and reviewer cover that.
 * SWE-bench Lite is a stretch goal, not yet run.
+* The UI is plain static HTML/JS/CSS by decision — no React, Vite or npm build
+  in v1, and no user-triggered code editing from the browser.
+* WebSockets are not proxied to a preview (501 by design).
 * One shared operator account, not per-user accounts.
 * Sessions are stateless, so logout clears the cookie but a copied cookie stays
   valid until it expires.
 * Production runs the sandbox as a local subprocess, so generated code executes
   with the API's network access and no isolation. Auth is not a substitute for
-  sandboxing.
+  sandboxing. The playground has the same caveat, with credentials stripped.

@@ -35,32 +35,46 @@ export function EvalPanel({ data }: { data: EvalResults | null }) {
         )}
       </div>
 
-      <table>
-        <thead>
-          <tr>
-            <th>Run</th>
-            <th>Status</th>
-            <th className="num">Pass rate</th>
-            <th className="num">Spec coverage</th>
-            <th className="num">Attempts</th>
-            <th className="num">Wall (s)</th>
-          </tr>
-        </thead>
-        <tbody>
-          {data.runs.map((r) => (
-            <tr key={r.run}>
-              <td>
-                <code>{r.run}</code>
-              </td>
-              <td>{r.status}</td>
-              <td className="num">{r.test_pass_rate?.toFixed(2) ?? "—"}</td>
-              <td className="num">{r.spec_coverage?.toFixed(2) ?? "—"}</td>
-              <td className="num">{r.attempts_to_green}</td>
-              <td className="num">{r.wall_time}</td>
+<table>
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>Status</th>
+              <th className="num">Pass rate</th>
+              <th className="num">Spec coverage</th>
+              <th className="num">UI gate</th>
+              <th className="num">Preview</th>
+              <th className="num">Attempts</th>
+              <th className="num">Wall (s)</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {data.runs.map((r) => (
+              <tr key={r.run}>
+                <td>
+                  <code>{r.run}</code>
+                </td>
+                <td>{r.status}</td>
+                <td className="num">{r.test_pass_rate?.toFixed(2) ?? "—"}</td>
+                <td className="num">{r.spec_coverage?.toFixed(2) ?? "—"}</td>
+                <td className="num">
+                  {r.ui_pass_rate === null || r.ui_pass_rate === undefined
+                    ? "—"
+                    : `${Math.round(r.ui_pass_rate * 100)}%`}
+                </td>
+                <td className="num">
+                  {r.preview_booted === null || r.preview_booted === undefined
+                    ? "—"
+                    : r.preview_booted
+                      ? "booted"
+                      : "no"}
+                </td>
+                <td className="num">{r.attempts_to_green}</td>
+                <td className="num">{r.wall_time}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
 
       <div className="alert note" style={{ marginTop: 14 }}>
         These numbers come from template mode, where the Developer emits a known-good bundle

@@ -70,6 +70,13 @@ class ApiSpec(BaseModel):
     # the boot check and the Reviewer.
     public_api: list[str] = []
 
+    # Whether this run should also generate a web UI for the API above. A
+    # boolean rather than a third ``kind``: only api-kind projects get a UI, and
+    # ``kind`` is threaded through eight modules, so widening it would buy
+    # nothing and cost a migration. Defaults to off, so a run that does not ask
+    # for a UI behaves exactly as it did before.
+    has_ui: bool = False
+
 
 class CodeBundle(BaseModel):
     files: dict[str, str]  # path -> content
@@ -136,6 +143,50 @@ class ReviewReport(BaseModel):
         return [c for c in self.comments if c.severity == "blocker"]
 
 
+class UiCheck(BaseModel):
+    """One static UI gate check. ``ok`` is a fact about the files, not a verdict."""
+
+    __test__ = False
+    name: str
+    ok: bool
+    detail: str = ""
+
+
+class UiSpec(BaseModel):
+    """The UI Designer's contract: what the pages are and what they read.
+
+    ``data_bindings`` are the load-bearing part. Each entry names a
+    ``METHOD /path`` that the UI actually calls, which is what lets the gate
+    check the UI against the generated API rather than trusting the model's own
+    summary of what it built.
+    """
+
+    __test__ = False
+    pages: list[str] = []
+    components: list[str] = []
+    data_bindings: list[str] = []
+    files: list[str] = []
+    contract_text: str = ""
+
+
+class UiReport(BaseModel):
+    """The UI gate's verdict.
+
+    Deliberately not a gate: a 3b model producing a mediocre UI must never turn
+    a green, reviewed backend run into a failure. ``ok`` is reported to the user
+    and to the eval metrics, and nothing else reads it.
+    """
+
+    __test__ = False
+    ok: bool = True
+    checks: list[UiCheck] = []
+    probed: list[str] = []
+
+    @property
+    def failures(self) -> list[UiCheck]:
+        return [c for c in self.checks if not c.ok]
+
+
 class GraphState(BaseModel):
     requirement: str = ""
     run_id: str = "default"
@@ -152,6 +203,14 @@ class GraphState(BaseModel):
     retry_dev: int = 0
     retry_test: int = 0
     retry_review: int = 0
+    # ---- full-stack generation ----
+    ui_spec: UiSpec | None = None
+    ui_code: CodeBundle | None = None
+    ui_report: UiReport | None = None
+    # Set when the run asked for a UI but produced none (no backend, or a
+    # non-api project). The UI nodes are then skipped rather than retried, and
+    # the terminal status is whatever the backend half decided.
+    skip_ui: bool = False
     status: str = "pending"
     # Populated when the run stops early so the failure is explainable rather
     # than presenting as a successful run with default metrics.

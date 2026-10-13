@@ -8,10 +8,22 @@ import { EvalPanel } from "./components/EvalPanel";
 import { FileViewer } from "./components/FileViewer";
 import { LoginPage } from "./components/LoginPage";
 import { PipelineTimeline } from "./components/PipelineTimeline";
+import { PlaygroundPanel } from "./components/PlaygroundPanel";
 import { RequirementForm } from "./components/RequirementForm";
 import { RunList } from "./components/RunList";
+import { UiPanel } from "./components/UiPanel";
 
-type Tab = "pipeline" | "stories" | "plan" | "spec" | "code" | "tests" | "report" | "review";
+type Tab =
+  | "pipeline"
+  | "stories"
+  | "plan"
+  | "spec"
+  | "code"
+  | "tests"
+  | "report"
+  | "review"
+  | "ui"
+  | "playground";
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: "pipeline", label: "Pipeline" },
@@ -22,6 +34,8 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: "tests", label: "Tests" },
   { id: "report", label: "Test report" },
   { id: "review", label: "Review" },
+  { id: "ui", label: "UI" },
+  { id: "playground", label: "Playground" },
 ];
 
 const POLL_MS = 1500;
@@ -41,6 +55,8 @@ export default function App() {
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [liveEvents, setLiveEvents] = useState<PipelineEvent[]>([]);
   const [tab, setTab] = useState<Tab>("pipeline");
+  // Bumped by the Playground's Refresh button to force a new iframe document.
+  const [previewReload, setPreviewReload] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [evals, setEvals] = useState<Awaited<ReturnType<typeof api.evals>> | null>(null);
@@ -182,7 +198,7 @@ export default function App() {
 
   const startRun = async (
     requirement: string,
-    opts: { skipTester: boolean; skipReviewer: boolean; skipReasoner: boolean }
+    opts: { skipTester: boolean; skipReviewer: boolean; skipReasoner: boolean; ui: boolean }
   ) => {
     setBusy(true);
     setError(null);
@@ -192,6 +208,7 @@ export default function App() {
         skip_tester: opts.skipTester,
         skip_reviewer: opts.skipReviewer,
         skip_reasoner: opts.skipReasoner,
+        ui: opts.ui,
       });
       setLiveEvents([]);
       await refreshRuns();
@@ -454,6 +471,17 @@ export default function App() {
                       : `missing ${detail.coverage.missing.join(", ")}`}
                   </div>
                 )}
+                {detail.ui_report && (
+                  <div className={`alert ${detail.ui_report.ok ? "note" : "error"}`} style={{ marginTop: 10 }}>
+                    UI gate:{" "}
+                    {detail.ui_report.ok
+                      ? "all static checks passed"
+                      : `failed ${detail.ui_report.checks
+                          .filter((c) => !c.ok)
+                          .map((c) => c.name)
+                          .join(", ")} (advisory)`}
+                  </div>
+                )}
               </div>
 
               <div className="tabs">
@@ -466,6 +494,9 @@ export default function App() {
                     {t.label}
                     {t.id === "review" && detail.review?.comments?.length
                       ? ` (${detail.review.comments.length})`
+                      : ""}
+                    {t.id === "ui" && Object.keys(detail.ui_code ?? {}).length
+                      ? ` (${Object.keys(detail.ui_code ?? {}).length})`
                       : ""}
                   </button>
                 ))}
@@ -599,6 +630,16 @@ export default function App() {
                 ) : (
                   <p className="empty">No review comments yet.</p>
                 ))}
+
+              {tab === "ui" && <UiPanel detail={detail} />}
+
+              {tab === "playground" && (
+                <PlaygroundPanel
+                  run={detail}
+                  reloadKey={previewReload}
+                  onReload={() => setPreviewReload((n) => n + 1)}
+                />
+              )}
             </>
           )}
 

@@ -4,5 +4,9 @@
   {"id": "task-manager-filter", "file": "task-manager.md",
    "requirement": "Build a task manager REST API with CRUD /tasks plus GET /tasks?done=true filter. Same validation (422/404) and /health."},
   {"id": "task-manager-notes", "file": "task-manager.md",
-   "requirement": "Build a task manager REST API with CRUD /tasks plus a notes field on tasks. Same validation (422/404) and /health."}
+   "requirement": "Build a task manager REST API with CRUD /tasks plus a notes field on tasks. Same validation (422/404) and /health."},
+  {"id": "bookclub-ui", "file": "bookclub.md", "ui": true,
+   "requirement": "Build a REST API for a book club: members borrow and return books. GET /health, GET /books, POST /loans to borrow an ISBN, POST /loans/{id}/return to return it, 404 on unknown ISBN."},
+  {"id": "recipes-ui", "file": "recipes.md", "ui": true,
+   "requirement": "Build a REST API for a recipe collection. GET /health, GET /recipes, POST /recipes with title required (422 on empty), DELETE /recipes/{id} with 404 on unknown id."}
 ]

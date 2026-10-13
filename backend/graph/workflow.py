@@ -4,6 +4,17 @@ Sequential by design: the Tester's independence comes from never seeing the
 code, not from running at the same time, and the small local models gain
 nothing from interleaving.
 
+The UI half (``want_ui=True``) runs *after* the backend tests are green and
+before the reviewer:
+
+    ... -> runner -> triage -> developer -> ui_designer -> ui_developer
+        -> ui_gate -> reviewer
+
+Sequential rather than parallel on purpose: the UI binds to a known-good API,
+so a backend that is still being repaired cannot produce a UI written against
+endpoints that do not exist yet. The UI verdict is advisory — it is reported,
+and it never changes the terminal status.
+
 Terminal statuses:
   accepted            green tests, review clean
   accepted_no_review  green tests, reviewer ablated
@@ -32,6 +43,7 @@ from agents import pm as PM
 from agents import reasoner as Reasoner
 from agents import reviewer as Reviewer
 from agents import tester as Tester
+from agents import ui as UI
 from agents.coverage import check as coverage_check
 from agents.introspect import all_routes, find_app_object, spec_paths
 from agents.llm import GenerationError
@@ -45,6 +57,9 @@ from schemas.messages import (
     TestFailure,
     TestReport,
     TestSuite,
+    UiCheck,
+    UiReport,
+    UiSpec,
     UserStories,
 )
 
@@ -53,9 +68,13 @@ NODES = (
     "reasoner",
     "designer",
     "developer",
+    "coverage",
     "tester",
     "runner",
     "triage",
+    "ui_designer",
+    "ui_developer",
+    "ui_gate",
     "reviewer",
     "final",
 )
@@ -71,6 +90,19 @@ def _save(out: Path, name: str, content: str) -> None:
 def _write_code(out: Path, code) -> None:
     for rel, content in code.files.items():
         p = out / "code" / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+
+
+def _write_ui_code(out: Path, code) -> None:
+    """UI files live under ``ui/`` so the preview can copy them verbatim.
+
+    Kept out of ``code/`` on purpose: the runner only ever imports ``.py`` from
+    there, and dropping HTML into a directory the pipeline treats as the Python
+    package would put a stray ``test_tasks.py`` next to a real module.
+    """
+    for rel, content in code.files.items():
+        p = out / "ui" / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
 
@@ -117,6 +149,7 @@ def reconstruct_state(run_dir: str | Path) -> GraphState:
                 files=plan_meta.get("files", []),
                 public_api=plan_meta.get("public_api", []),
                 contract_text=plan_meta.get("contract_text", ""),
+                has_ui=bool(plan_meta.get("has_ui", False)),
             )
 
     code_files: dict[str, str] = {}
@@ -167,6 +200,32 @@ def reconstruct_state(run_dir: str | Path) -> GraphState:
     memory = _json("reflections.json")
     if isinstance(memory, list):
         st.memory = [str(m) for m in memory]
+
+    # UI half. Without these three reads a resume silently regenerates (or
+    # drops) a UI the previous run already produced, which is the exact data
+    # loss reconstruct_state exists to prevent.
+    ui_contract = _json("ui_contract.json")
+    if isinstance(ui_contract, dict):
+        with contextlib.suppress(Exception):
+            st.ui_spec = UiSpec.model_validate(ui_contract)
+
+    ui_files: dict[str, str] = {}
+    ui_root = root / "ui"
+    if ui_root.is_dir():
+        for p in sorted(ui_root.rglob("*")):
+            if p.is_file():
+                try:
+                    ui_files[str(p.relative_to(ui_root))] = p.read_text()
+                except OSError:
+                    continue
+    if ui_files:
+        with contextlib.suppress(Exception):
+            st.ui_code = CodeBundle(files=ui_files)
+
+    ui_report = _json("ui_report.json")
+    if isinstance(ui_report, dict):
+        with contextlib.suppress(Exception):
+            st.ui_report = UiReport.model_validate(ui_report)
 
     return st
 
@@ -224,6 +283,10 @@ def _finish(out: Path, st, t0: float, emit) -> None:
         "entrypoint": st.code.entry_module if st.code else None,
         "files": sorted(st.code.files) if st.code else [],
         "domain_coverage": st.coverage.model_dump() if st.coverage else None,
+        # Advisory only: the UI half never contributes to ``status``.
+        "ui_requested": bool(getattr(st.spec, "has_ui", False)),
+        "ui_files": sorted(st.ui_code.files) if st.ui_code else [],
+        "ui_report": st.ui_report.model_dump() if st.ui_report else None,
         "wall_time": round(time.time() - t0, 1),
     }
     _save(out, "summary.json", json.dumps(summary, indent=2))
@@ -240,6 +303,7 @@ def run_team(
     skip_tester: bool = False,
     skip_reviewer: bool = False,
     skip_reasoner: bool = False,
+    want_ui: bool = False,
     verbose: bool = False,
     on_event: Callable[[str, str, dict], None] | None = None,
     run_id: str | None = None,
@@ -250,6 +314,10 @@ def run_team(
 
     Raises nothing for an expected failure: a generation that never succeeds
     ends the run with ``status="blocked"`` and a populated ``error``.
+
+    ``want_ui`` adds the three UI nodes after the tests are green. It is off by
+    default, and a UI failure never changes the terminal status: ``ui_gate``
+    reports what it found and the run carries on to review.
 
     ``cancel`` is a cooperative stop signal (see ``RunStore.stop``): it is
     honoured at node boundaries, so stopping latency is bounded by one agent
@@ -324,6 +392,8 @@ def run_team(
                     ("designer", st.spec is not None),
                     ("developer", st.code is not None),
                     ("tester", st.tests is not None),
+                    ("ui_designer", st.ui_spec is not None),
+                    ("ui_developer", st.ui_code is not None),
                 )
                 if present
             )
@@ -378,20 +448,6 @@ def run_team(
             emit("designer", "start")
             st.spec = Designer.stories_to_spec(st.stories, requirement=requirement, plan=st.plan)
             _save(out, "spec.yaml", st.spec.openapi_yaml)
-            _save(
-                out,
-                "plan.json",
-                json.dumps(
-                    {
-                        "kind": st.spec.kind,
-                        "entrypoint": st.spec.entrypoint,
-                        "files": st.spec.files,
-                        "public_api": st.spec.public_api,
-                        "contract_text": st.spec.contract_text,
-                    },
-                    indent=2,
-                ),
-            )
             emit(
                 "designer",
                 "done",
@@ -401,6 +457,27 @@ def run_team(
                     "entrypoint": st.spec.entrypoint,
                 },
             )
+        # Recorded on the spec, not just in memory, so a resume reads it back
+        # from plan.json and knows the UI is part of this run.
+        st.spec.has_ui = bool(want_ui and UI.is_ui_eligible(st.spec))
+        if want_ui and not st.spec.has_ui:
+            log("ui skipped: only an api-kind project with declared endpoints gets a UI")
+            st.skip_ui = True
+        _save(
+            out,
+            "plan.json",
+            json.dumps(
+                {
+                    "kind": st.spec.kind,
+                    "entrypoint": st.spec.entrypoint,
+                    "files": st.spec.files,
+                    "public_api": st.spec.public_api,
+                    "contract_text": st.spec.contract_text,
+                    "has_ui": st.spec.has_ui,
+                },
+                indent=2,
+            ),
+        )
         if cancelled_now():
             return finish_cancelled()
 
@@ -507,16 +584,6 @@ def run_team(
                         break
                     continue
                 no_ops = 0
-                st.retry_dev += 1
-                _write_code(out, st.code)
-                emit("developer", "start", {"reason": "boot_failure", "retry": st.retry_dev})
-                booted, boot_msg = Runner.boot_check(st.code, public_api=declared)
-                _save(out, "boot.txt", boot_msg)
-                emit(
-                    "runner", "progress", {"detail": f"boot check: {'ok' if booted else 'FAILED'}"}
-                )
-                if booted:
-                    break
                 st.retry_dev += 1
                 _write_code(out, st.code)
                 emit("developer", "start", {"reason": "boot_failure", "retry": st.retry_dev})
@@ -659,6 +726,75 @@ def run_team(
             st.error = "patched code no longer exposes an importable app object"
             break
 
+    # ---- UI nodes ----
+    # Runs only on a green backend: the UI binds to endpoints that now exist and
+    # are exercised by a passing suite. Every failure here is swallowed — the
+    # UI verdict is reported to the user and to the eval metrics, and the
+    # terminal status below is decided by the backend alone.
+    if st.status == "tests_green" and st.spec.has_ui and not st.skip_ui:
+        try:
+            if st.ui_spec is None:
+                emit("ui_designer", "start")
+                st.ui_spec = UI.design_ui(st.spec, st.stories)
+                _save(out, "ui_contract.json", st.ui_spec.model_dump_json(indent=2))
+                emit(
+                    "ui_designer",
+                    "done",
+                    {
+                        "pages": len(st.ui_spec.pages),
+                        "components": len(st.ui_spec.components),
+                        "bindings": len(st.ui_spec.data_bindings),
+                        "files": st.ui_spec.files,
+                    },
+                )
+            if cancelled_now():
+                return finish_cancelled()
+
+            if st.ui_code is None:
+                emit("ui_developer", "start")
+                st.ui_code = UI.build_ui(
+                    st.spec,
+                    st.stories,
+                    st.ui_spec,
+                    entry_module=st.code.entry_module,
+                    entry_attr=st.code.entry_attr,
+                )
+                _write_ui_code(out, st.ui_code)
+                emit("ui_developer", "done", {"files": sorted(st.ui_code.files)})
+            if cancelled_now():
+                return finish_cancelled()
+
+            emit("ui_gate", "start")
+            st.ui_report = UI.gate(st.spec, st.ui_spec, st.ui_code.files)
+            _save(out, "ui_report.json", st.ui_report.model_dump_json(indent=2))
+            emit(
+                "ui_gate",
+                "done",
+                {
+                    "ok": st.ui_report.ok,
+                    "failed": [c.name for c in st.ui_report.failures],
+                    "advisory": True,
+                },
+            )
+            if not st.ui_report.ok:
+                log(
+                    "ui gate: "
+                    + "; ".join(f"{c.name}: {c.detail}" for c in st.ui_report.failures)
+                    + " (advisory; terminal status unaffected)"
+                )
+        except GenerationError as exc:
+            st.ui_report = UiReport(
+                ok=False,
+                checks=[
+                    UiCheck(name="generation", ok=False, detail=str(exc)[:400]),
+                ],
+            )
+            _save(out, "ui_report.json", st.ui_report.model_dump_json(indent=2))
+            log(f"ui generation failed: {exc} (advisory; terminal status unaffected)")
+            emit("ui_gate", "done", {"ok": False, "failed": ["generation"], "advisory": True})
+        if cancelled_now():
+            return finish_cancelled()
+
     # ---- review loop ----
     if st.status == "tests_green" and skip_reviewer:
         st.status = "accepted_no_review"
@@ -669,7 +805,17 @@ def run_team(
             ruff_out, bandit_out = Runner.static_analysis(st.code)
             _save(out, "ruff.txt", ruff_out)
             _save(out, "bandit.txt", bandit_out)
-            st.review = Reviewer.review(st.code, st.spec, st.tests, st.report, ruff_out, bandit_out)
+            st.review = Reviewer.review(
+                st.code,
+                st.spec,
+                st.tests,
+                st.report,
+                ruff_out,
+                bandit_out,
+                ui_spec=st.ui_spec,
+                ui_code=st.ui_code,
+                ui_report=st.ui_report,
+            )
             _save(out, "review.json", st.review.model_dump_json(indent=2))
             emit(
                 "reviewer",

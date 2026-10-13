@@ -10,6 +10,9 @@ export type PipelineNode =
   | "tester"
   | "runner"
   | "triage"
+  | "ui_designer"
+  | "ui_developer"
+  | "ui_gate"
   | "reviewer"
   | "final";
 
@@ -81,6 +84,41 @@ export interface ReviewComment {
   location: string;
 }
 
+/** One static check from the UI gate. Advisory: never gates acceptance. */
+export interface UiCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+/** The UI Designer's contract. */
+export interface UiSpec {
+  pages: string[];
+  components: string[];
+  data_bindings: string[];
+  files: string[];
+}
+
+export interface UiReport {
+  ok: boolean;
+  checks: UiCheck[];
+  probed: string[];
+}
+
+export type PreviewState = "stopped" | "starting" | "running" | "crashed";
+
+export interface PreviewStatus {
+  run_id: string;
+  state: PreviewState;
+  /** Gateway path for the iframe; null unless the app is actually up. */
+  url: string | null;
+  port: number | null;
+  started_at: number | null;
+  idle_seconds: number;
+  error: string | null;
+  log_tail: string;
+}
+
 export interface RunDetail extends RunSummary {
   events: PipelineEvent[];
   artifacts: string[];
@@ -94,6 +132,12 @@ export interface RunDetail extends RunSummary {
   report: { passed: number; failed: number; raw?: string } | null;
   coverage?: Coverage | null;
   memory: string[];
+  /** UI contract; null unless the run asked for a web UI. */
+  ui?: UiSpec | null;
+  /** Generated index.html / app.js / styles.css. */
+  ui_code?: Record<string, string>;
+  /** Static gate verdict over those files. */
+  ui_report?: UiReport | null;
 }
 
 export interface SessionInfo {
@@ -127,6 +171,10 @@ export interface EvalResults {
     spec_coverage: number;
     attempts_to_green: number;
     wall_time: number;
+    /** Fraction of the UI gate's static checks that passed; null if no UI. */
+    ui_pass_rate?: number | null;
+    /** Whether the app booted under the playground, when a preview was run. */
+    preview_booted?: boolean | null;
   }>;
   baseline: { passed: number; failed: number; wall_time: number } | null;
   total: number;
@@ -144,6 +192,9 @@ export const NODE_LABELS: Record<PipelineNode, string> = {
   tester: "Tester",
   runner: "Sandbox",
   triage: "Triage",
+  ui_designer: "UI design",
+  ui_developer: "UI build",
+  ui_gate: "UI gate",
   reviewer: "Reviewer",
   final: "Final",
 };
@@ -157,6 +208,9 @@ export const NODE_ORDER: PipelineNode[] = [
   "tester",
   "runner",
   "triage",
+  "ui_designer",
+  "ui_developer",
+  "ui_gate",
   "reviewer",
   "final",
 ];
