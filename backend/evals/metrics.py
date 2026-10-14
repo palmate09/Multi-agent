@@ -53,6 +53,8 @@ def summarize_run(run_dir: str) -> dict:
 
     passed = s.get("tests_passed", 0)
     failed = s.get("tests_failed", 0)
+
+    ui_checks = _ui_checks(d / "ui_report.json")
     return {
         "run": d.name,
         "status": s.get("status"),
@@ -65,8 +67,48 @@ def summarize_run(run_dir: str) -> dict:
         "review_rounds": s.get("review_rounds", 0),
         "files": s.get("files", []),
         "entrypoint": s.get("entrypoint"),
+        # Fraction of the UI gate's static checks that passed. None (not 0.0) when
+        # the run produced no UI, so a suite of API-only runs does not read as
+        # a suite where every UI failed.
+        "ui_pass_rate": (
+            round(sum(1 for c in ui_checks if c.get("ok")) / len(ui_checks), 3)
+            if ui_checks
+            else None
+        ),
+        # Whether the app actually booted under the playground. None until a
+        # preview has been attempted for this run.
+        "preview_booted": _preview_booted(d),
+        "ui_files": s.get("ui_files", []),
         "wall_time": s.get("wall_time"),
     }
+
+
+def _ui_checks(path: Path) -> list[dict]:
+    report = _load(path, None)
+    if not isinstance(report, dict):
+        return []
+    checks = report.get("checks")
+    return [c for c in checks if isinstance(c, dict)] if isinstance(checks, list) else []
+
+
+def _preview_booted(run_dir: Path) -> bool | None:
+    """Did a preview of this run reach ``running`` at least once?
+
+    Read from the run's own preview status file rather than from a live service:
+    the eval runs headless and sequentially, long after any preview process has
+    been reaped, so the service can only answer "stopped" and would report
+    every run as a failure.
+
+    ``ever_booted`` is sticky — it survives a stop, so a run that booted and was
+    then shut down still counts. Older files that predate it fall back to the
+    instantaneous state.
+    """
+    status = _load(run_dir / "playground.json", None)
+    if not isinstance(status, dict):
+        return None
+    if isinstance(status.get("ever_booted"), bool):
+        return status["ever_booted"]
+    return status.get("state") == "running"
 
 
 def tokens_from_log(log: str = "outputs/llm_log.jsonl") -> dict:

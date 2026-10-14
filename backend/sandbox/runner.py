@@ -1,18 +1,208 @@
-"""Sandbox runner: Docker (no net, limits) with local-subprocess fallback."""
+"""Sandbox runner: execute generated code in a hardened container.
+
+Three entry points, each with two transports:
+
+    run_tests         pytest against the generated suite
+    boot_check        import the app and confirm its entry point resolves
+    static_analysis   ruff + bandit over the generated source
+
+Transport is chosen by :data:`SANDBOX_MODE`:
+
+``container`` (default)
+    A hardened container: ``--read-only``, ``--cap-drop ALL``,
+    ``--security-opt no-new-privileges:true``, ``--pids-limit``, non-root uid,
+    a tmpfs ``/tmp``, memory and CPU ceilings, and a compose network marked
+    ``internal: true`` so there is no route to the internet. The full argv is
+    built by :func:`sandbox.flags.run_argv` and asserted verbatim in
+    ``backend/tests/test_sandbox_runner.py``.
+
+``subprocess``
+    A plain child process on the host, with the platform's filesystem and
+    network. It exists so the project can be developed and tested without a
+    container engine, and it is off in every deployed profile. It is **not**
+    isolation and the log/report text says so.
+
+``local``
+    An alias for ``subprocess``, kept because that is the word the CLI and the
+    older tests use.
+
+The cost of ``container`` mode is real and stated rather than hidden: the
+sandbox has no route to PyPI, so a generated app importing anything outside the
+wheelhouse in ``sandbox/requirements.txt`` cannot boot. That is the intended
+trade -- a prebuilt image is the only genuinely strong isolation available
+without microVMs -- but it has to be legible, so the failure names the missing
+package instead of leaving the user to read an ImportError.
+"""
+
 from __future__ import annotations
 
 import ast
+import logging
+import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+from collections.abc import Iterable
+from contextlib import contextmanager
 from pathlib import Path
 
 from agents.introspect import find_app_object
+from sandbox import docker as Docker
+from sandbox.flags import SandboxLimits, run_argv
 from schemas.messages import CodeBundle, TestFailure, TestReport, TestSuite
 
+log = logging.getLogger("sandbox.runner")
+
 PY = sys.executable or "python"
+
+#: The exact pytest invocation used for every sandbox run, local or containered.
+#: ``-p no:cacheprovider`` is not a speed trick so much as a containment one:
+#: pytest otherwise writes a ``.pytest_cache/`` directory into the very
+#: directory the generated app owns, and under ``--read-only`` that write is an
+#: outright failure. It also costs ~0.1-0.2 s per run.
+PYTEST_ARGS = ("-m", "pytest", "-q", "-p", "no:cacheprovider")
+
+#: Never fewer than this many slots, whatever the configuration says. A cap of
+#: zero would deadlock every run; a cap of one would serialise the fix loop.
+MIN_CONCURRENT = 1
+
+#: Environment every sandbox container gets. The platform's credentials are not
+#: merely absent -- the variables are never passed, so a generated app cannot
+#: read them out of its own environment either.
+SANDBOX_ENV = {
+    # "You are being tested, not deployed."
+    "SANDBOX": "1",
+    "PREVIEW": "1",
+    # Bytecode and pytest's cache both write into the working directory, which
+    # is mounted read-only. Turning them off is what makes that mount legal.
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONUNBUFFERED": "1",
+    # Data goes to the writable tmpfs, never to /app.
+    "TMPDIR": "/tmp",
+    "PREVIEW_DIR": "/data",
+    "SQLITE_PATH": "/data/preview.db",
+    "DATABASE_URL": "sqlite:////data/preview.db",
+}
+
+
+def sandbox_env(extra: dict | None = None) -> dict[str, str]:
+    return {**SANDBOX_ENV, **(extra or {})}
+
+
+def sandbox_mode() -> str:
+    """``container``, ``subprocess`` or ``local``, from ``SANDBOX_MODE``."""
+    mode = (os.getenv("SANDBOX_MODE", "") or "").strip().lower()
+    return mode if mode in {"container", "subprocess", "local"} else "container"
+
+
+def uses_docker() -> bool:
+    """Whether this call should go to a container."""
+    if sandbox_mode() != "container":
+        return False
+    if (os.getenv("SANDBOX_FORCE_LOCAL", "") or "").strip() in {"1", "true", "yes"}:
+        return False
+    return Docker.available()
+
+
+#: Bounds how many sandbox containers this process runs at once. A burst of
+#: failed fix-loop iterations -- each of which starts a container -- must not be
+#: able to fork-bomb the host. A blocking semaphore rather than a rejection: the
+#: pipeline is sequential per run, so the only contention is between concurrent
+#: runs, and queueing them is correct.
+_semaphores: dict[int, threading.BoundedSemaphore] = {}
+_semaphores_guard = threading.Lock()
+
+
+def _semaphore(limit: int) -> threading.BoundedSemaphore:
+    with _semaphores_guard:
+        sem = _semaphores.get(limit)
+        if sem is None:
+            sem = threading.BoundedSemaphore(max(MIN_CONCURRENT, limit))
+            _semaphores[limit] = sem
+        return sem
+
+
+@contextmanager
+def _slot(limits: SandboxLimits):
+    sem = _semaphore(limits.max_concurrent)
+    sem.acquire()
+    try:
+        yield
+    finally:
+        sem.release()
+
+
+def _runs_volume() -> str | None:
+    """The named volume the runs data lives in, when the sidecar is in play.
+
+    The backend and the sidecar see the same volume, but the *daemon* sees
+    neither: it resolves a `-v` source on the host, so the bundle path -- which
+    exists only inside the backend container's mount -- would be turned into an
+    empty directory on the host. The sandbox would then start, run pytest, and
+    collect nothing. Naming the volume instead lets the daemon resolve it
+    globally, and :func:`sandbox.flags.run_argv` sets the workdir to the bundle
+    within it.
+    """
+    if not (os.getenv("SANDBOX_API_URL", "") or "").strip():
+        return None
+    return (os.getenv("RUNS_VOLUME", "") or "").strip() or None
+
+
+def _mount_root() -> Path | None:
+    """The directory the sidecar will accept a mount from, if one is in play.
+
+    ``SANDBOX_MOUNT_ROOT`` is the sidecar's own confinement root; ``RUNS_DIR``
+    is the same volume mounted at the same path on the backend, so either name
+    resolves to it. Returns ``None`` when no sidecar is configured, because the
+    confinement simply does not exist then and a temp directory is correct.
+    """
+    if not (os.getenv("SANDBOX_API_URL", "") or "").strip():
+        return None
+    for name in ("SANDBOX_MOUNT_ROOT", "RUNS_DIR"):
+        raw = (os.getenv(name, "") or "").strip()
+        if raw:
+            root = Path(raw)
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                continue
+            return root
+    return None
+
+
+@contextmanager
+def _bundle_dir(prefix: str):
+    """A scratch directory the container's non-root user can actually read.
+
+    Created **inside the sidecar's mount root** when there is one. This is not a
+    tidy-up detail: the sidecar refuses any mount outside its root, so a bundle
+    under ``tempfile.gettempdir()`` (``/tmp``) makes every single containerised
+    test run fail with ``mount must be inside /data/runs`` -- the sandbox cannot
+    run at all, and the error reads like a confinement bug rather than the path
+    choice that caused it. Both processes see the same volume at the same path,
+    so a directory created here is visible to the sidecar.
+
+    ``tempfile.mkdtemp`` creates 0700 owned by whoever started the run, and the
+    sandbox runs as uid 10001 -- which cannot traverse the directory it is
+    asked to read. Every pytest invocation then died with ``PermissionError:
+    '/app/pytest.toml'`` during rootdir discovery, which reads like a pytest
+    problem and is not one. 0755 is correct here: the contents are generated
+    source the platform just wrote, and the mount is read-only anyway.
+    """
+    root = _mount_root()
+    if root is None:
+        path = Path(tempfile.mkdtemp(prefix=prefix))
+    else:
+        # mkdtemp under the mount root: same 0700 default, same need to widen it.
+        path = Path(tempfile.mkdtemp(prefix=prefix, dir=str(root)))
+    try:
+        os.chmod(path, 0o755)
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def write_bundle(code: CodeBundle, tests: TestSuite, dest: Path) -> None:
@@ -69,35 +259,213 @@ def _parse_pytest(output: str) -> TestReport:
     return TestReport(passed=passed, failed=failed, failures=failures[:10], raw=output[-4000:])
 
 
+#: `ModuleNotFoundError: No module named 'foo'` and its dotted variants, which
+#: is what a missing wheelhouse entry looks like from the inside.
+_MISSING_MODULE = re.compile(r"No module named ['\"]([\w.]+)['\"]")
+
+
+def explain_missing_dependencies(output: str, generated: Iterable[str] = ()) -> str:
+    """Name the imports the sandbox wheelhouse could not satisfy.
+
+    The sandbox network is ``internal: true``, so a generated app that imports
+    something outside ``sandbox/requirements.txt`` cannot install it and cannot
+    boot. That trade is only acceptable if the user is told what happened:
+    "ModuleNotFoundError" in a pytest log reads like a bug in the generated
+    code, when it is a boundary decision and the fix is to add one line to the
+    wheelhouse file.
+
+    ``generated`` is the bundle's own module names. They are excluded because
+    the most commonly missing module of all is the generated entrypoint --
+    ``No module named 'main'`` means the code is broken or the entry point moved,
+    and telling the user to add `main` to the wheelhouse file sends them to edit
+    entirely the wrong thing.
+    """
+    mine = {m.split(".")[0] for m in generated}
+    found: list[str] = []
+    for name in _MISSING_MODULE.findall(output or ""):
+        top = name.split(".")[0]
+        if top in found or top in mine or top in sys.stdlib_module_names:
+            continue
+        found.append(top)
+    if not found:
+        return ""
+    names = ", ".join(f"`{n}`" for n in found[:6])
+    many = len(found) > 1
+    return (
+        f"dependenc{'ies' if many else 'y'} {names} not in the sandbox wheelhouse. "
+        f"The sandbox has no network access, so it cannot install "
+        f"{'them' if many else 'it'}; add {'them' if many else 'it'} to "
+        f"backend/sandbox/requirements.txt and rebuild the sandbox image."
+    )
+
+
+def _annotate(report: TestReport, output: str, generated: Iterable[str] = ()) -> TestReport:
+    """Attach the wheelhouse explanation to the report's first failure."""
+    note = explain_missing_dependencies(output, generated)
+    if not note:
+        return report
+    report.failures = [
+        TestFailure(name="sandbox-wheelhouse", error=note[:400]),
+        *report.failures,
+    ][:10]
+    return report
+
+
+def _failure(name: str, error: str, raw: str = "") -> TestReport:
+    return TestReport(
+        passed=0,
+        failed=99,
+        failures=[TestFailure(name=name, error=error[:400])],
+        raw=raw[-2000:] or error[:2000],
+    )
+
+
 def run_tests_local(code: CodeBundle, tests: TestSuite, timeout: int = 60) -> TestReport:
-    tmp = Path(tempfile.mkdtemp(prefix="agent-team-"))
-    try:
-        write_bundle(code, tests, tmp)
-        p = subprocess.run([PY, "-m", "pytest", "-q"], cwd=tmp,
-                           capture_output=True, text=True, timeout=timeout)
-        return _parse_pytest(p.stdout + "\n" + p.stderr)
-    except subprocess.TimeoutExpired:
-        return TestReport(passed=0, failed=99, failures=[TestFailure(name="timeout", error="pytest timeout")], raw="timeout")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    """Run pytest as a child process of *this* interpreter.
 
-
-def run_tests(code: CodeBundle, tests: TestSuite, timeout: int = 60, use_docker: bool = False) -> TestReport:
-    if use_docker and shutil.which("docker"):
+    Not isolation. It exists for development without a container engine, and
+    the mode name is reported alongside the result so a report written from a
+    subprocess run cannot be mistaken for a sandboxed one.
+    """
+    with _bundle_dir("agent-team-") as tmp:
         try:
-            tmp = Path(tempfile.mkdtemp(prefix="agent-team-"))
             write_bundle(code, tests, tmp)
-            subprocess.run(["docker", "build", "-q", "-t", "agent-team-sandbox", str(Path(__file__).parent)],
-                           capture_output=True, timeout=120)
-            p = subprocess.run(["docker", "run", "--rm", "--network", "none",
-                                "--memory", "512m", "--cpus", "1",
-                                "-v", f"{tmp}:/app", "agent-team-sandbox"],
+            p = subprocess.run([PY, *PYTEST_ARGS], cwd=tmp,
                                capture_output=True, text=True, timeout=timeout)
-            return _parse_pytest(p.stdout + "\n" + p.stderr)
-        except Exception as e:
-            return TestReport(passed=0, failed=99, failures=[TestFailure(name="docker", error=str(e)[:300])], raw=str(e))
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            output = p.stdout + "\n" + p.stderr
+            return _annotate(_parse_pytest(output), output, _importable_modules(code))
+        except subprocess.TimeoutExpired:
+            return _failure("timeout", f"pytest exceeded {timeout}s in subprocess mode")
+
+
+def run_tests_container(
+    code: CodeBundle,
+    tests: TestSuite,
+    timeout: int = 60,
+    limits: SandboxLimits | None = None,
+) -> TestReport:
+    """Run the generated suite in a hardened container.
+
+    The image is built at most once per Dockerfile revision
+    (:func:`sandbox.docker.ensure_image`) rather than once per test cycle, and
+    its tag carries the Dockerfile's hash so concurrent runs cannot race on a
+    shared name.
+    """
+    limits = limits or SandboxLimits.from_env()
+    try:
+        Docker.ensure_network(limits.network)
+        image = Docker.ensure_image(limits.image)
+    except Docker.DockerUnavailable as exc:
+        return _failure("sandbox-image", f"could not prepare the sandbox: {exc}")
+
+    with _bundle_dir("agent-team-") as tmp:
+        try:
+            write_bundle(code, tests, tmp)
+            # The run directory is the only host path the container can see,
+            # mounted :ro at /app. The container user cannot write to it, which
+            # is the point: it is the platform's copy of the generated files and
+            # the suite that grades them, not scratch space.
+            volume = _runs_volume()
+            # With a volume the bundle is addressed *inside* the mount, so the
+            # workdir is the bundle's name under the mount point -- not the
+            # path this process sees. The sidecar turns that back into the
+            # confined host-side mount it validates before starting anything.
+            inside = None
+            if volume:
+                rel = tmp.relative_to(_mount_root() or tmp.parent)
+                inside = f"{limits.workdir}/{rel.as_posix()}"
+            # pytest runs with its working directory on the writable tmpfs, not
+            # in the read-only code mount. A generated test routinely points
+            # SQLite at a *relative* path -- `sqlite:///test_recipes.db` -- and
+            # a relative path resolves against the cwd, which is /app and
+            # therefore unwritable. That is not a bad generation: it is the
+            # read-only mount doing its job, and it failed every attempt with
+            # `sqlite3.OperationalError: unable to open database file`.
+            #
+            # The code stays mounted read-only at /app (so the suite still cannot
+            # rewrite the tests that grade it); PYTHONPATH=/app keeps `import
+            # main` resolving, and anything the run writes lands on the tmpfs.
+            # Collect only *this* bundle. With a volume mounted at the workdir,
+            # /app is the whole runs directory, so `pytest /app` collects every
+            # other run's tests on the host -- cross-run contamination, and a
+            # duplicate-basename error rather than a result.
+            target = inside or limits.workdir
+
+            # Run on a disposable copy, because generated code and generated
+            # tests both write next to themselves. A relative SQLite path
+            # resolves against the cwd, and `Path(__file__).parent` resolves into
+            # the mount -- and the mount is read-only on purpose, so that a
+            # generated suite cannot rewrite the platform's copy of the very
+            # tests that are about to grade it.
+            #
+            # Making the mount writable to fix that would trade the control for
+            # convenience. Copying instead keeps the host copy read-only (so a
+            # container still cannot tamper with the stored artifacts, the spec,
+            # or any other run) and gives the run somewhere disposable to write,
+            # which is what a CI runner does with a build directory anyway.
+            work = limits.data_mount or "/tmp"
+            staged = f"{work}/w"
+            # Expressed in Python rather than shell on purpose. The sidecar
+            # rebuilds the argv from allowlisted fields and deliberately drops
+            # the caller's entrypoint -- "python -m ..." is the whole surface, and
+            # letting a caller name the entrypoint would let it name the program.
+            # So the staging runs under the fixed `python` entrypoint instead.
+            script = (
+                "import os,shutil,subprocess,sys;"
+                f"d={staged!r};"
+                "shutil.rmtree(d,ignore_errors=True);"
+                f"shutil.copytree({target!r},d);"
+                "os.chdir(d);"
+                "sys.exit(subprocess.call([sys.executable,'-m','pytest','-q','-p','no:cacheprovider']))"
+            )
+            argv = run_argv(
+                image,
+                ["-c", script],
+                limits=limits,
+                mount=None if volume else str(tmp),
+                mount_volume=volume,
+                workdir=limits.data_mount if limits.data_mount else inside,
+                env=sandbox_env(),
+                entrypoint="python",
+                with_data=True,
+            )
+            with _slot(limits):
+                # The mount is stated, not inferred from argv: the cwd is now the
+                # writable tmpfs, so the workdir no longer names the bundle, and
+                # the sidecar can only confine a mount it is actually given.
+                result = Docker.run_container(argv, timeout=timeout, mount=str(tmp))
+            output = result.output
+            return _annotate(_parse_pytest(output), output, _importable_modules(code))
+        except Docker.DockerUnavailable as exc:
+            return _failure("docker", str(exc))
+        except subprocess.TimeoutExpired:
+            return _failure("timeout", f"sandbox container exceeded {timeout}s")
+        except Exception as exc:  # a runner exception must never crash a run
+            log.exception("sandbox container run failed")
+            return _failure("sandbox", f"{type(exc).__name__}: {exc}")
+
+
+def run_tests(
+    code: CodeBundle,
+    tests: TestSuite,
+    timeout: int = 60,
+    use_docker: bool | None = None,
+) -> TestReport:
+    """Run the generated suite in whatever mode is configured.
+
+    ``use_docker=None`` (the default everywhere) means "defer to
+    ``SANDBOX_MODE``". Passing ``False`` forces the subprocess path, which is
+    what ``cli.py --docker=false`` and the offline tests want; passing ``True``
+    requests the container but still degrades to a subprocess when no engine is
+    reachable, because a run must not fail for want of one.
+    """
+    mode = sandbox_mode()
+    if use_docker is False:
+        mode = "subprocess"
+    elif use_docker is True:
+        mode = "container"
+    if mode == "container" and uses_docker():
+        return run_tests_container(code, tests, timeout)
     return run_tests_local(code, tests, timeout)
 
 
@@ -200,25 +568,79 @@ def boot_check(
             f"print('boot-ok', type(a).__name__)"
         )
 
-    tmp = Path(tempfile.mkdtemp(prefix="agent-boot-"))
+    with _bundle_dir("agent-boot-") as tmp:
+        try:
+            write_bundle(code, TestSuite(files={}), tmp)
+            if uses_docker():
+                out = _exec_in_container(["-c", probe], tmp, timeout)
+            else:
+                p = subprocess.run(
+                    [PY, "-c", probe], cwd=tmp, capture_output=True, text=True, timeout=timeout
+                )
+                out = p.stdout + p.stderr
+            ok, detail = _read_boot_verdict(out, bool(public_api), _importable_modules(code))
+            return ok, detail
+        except subprocess.TimeoutExpired:
+            return False, f"import timed out after {timeout}s (a module probably blocks at import)"
+        except Exception as e:
+            return False, str(e)
+
+
+def _read_boot_verdict(
+    output: str, public_api: bool, generated: Iterable[str] = ()
+) -> tuple[bool, str]:
+    """Did the probe succeed, and what should the user be shown if it did not?"""
+    if public_api:
+        # "boot-resolved 0 of 3" is not a pass: every declared name must
+        # actually resolve or the tests cannot import them.
+        ok = "MISSING:" not in output and "boot-resolved" in output
+    else:
+        ok = "boot-ok" in output
+    detail = output[-1000:]
+    if not ok:
+        note = explain_missing_dependencies(output, generated)
+        if note:
+            # Same trade as the test loop, reported the same way: a generated
+            # app that imports something outside the wheelhouse fails at import
+            # and the reason has to name the wheelhouse.
+            detail = f"{note}\n\n{detail}"[-1400:]
+    return ok, detail
+
+
+def _exec_in_container(py_args: list[str], workdir: Path, timeout: int) -> str:
+    """``python <args>`` in a hardened sandbox container. Returns combined output."""
+    limits = SandboxLimits.from_env()
     try:
-        write_bundle(code, TestSuite(files={}), tmp)
-        p = subprocess.run(
-            [PY, "-c", probe], cwd=tmp, capture_output=True, text=True, timeout=timeout
-        )
-        if public_api:
-            # "boot-resolved 0 of 3" is not a pass: every declared name must
-            # actually resolve or the tests cannot import them.
-            ok = "MISSING:" not in p.stdout and "boot-resolved" in p.stdout
-        else:
-            ok = "boot-ok" in p.stdout
-        return ok, (p.stdout + p.stderr)[-1000:]
-    except subprocess.TimeoutExpired:
-        return False, f"import timed out after {timeout}s (a module probably blocks at import)"
-    except Exception as e:
-        return False, str(e)
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        Docker.ensure_network(limits.network)
+        image = Docker.ensure_image(limits.image)
+    except Docker.DockerUnavailable as exc:
+        return f"sandbox unavailable: {exc}"
+    # Same reasoning as the test loop: behind a sidecar the mount is by volume
+    # and the workdir names the bundle *inside* it, or a host path that the
+    # daemon cannot resolve. The boot probe imports the app by module name, so
+    # getting this wrong presents as `ModuleNotFoundError: No module named
+    # 'main'` -- which reads as a broken generation rather than a mount that
+    # arrived empty.
+    volume = _runs_volume()
+    inside = None
+    if volume:
+        root = _mount_root()
+        if root and root in workdir.parents:
+            rel = workdir.relative_to(root)
+            inside = f"{limits.workdir}/{rel.as_posix()}"
+    argv = run_argv(
+        image,
+        py_args,
+        limits=limits,
+        mount=None if volume else str(workdir),
+        mount_volume=volume if inside else None,
+        workdir=inside,
+        env=sandbox_env(),
+        entrypoint="python",
+        with_data=True,
+    )
+    with _slot(limits):
+        return Docker.run_container(argv, timeout=timeout, mount=str(workdir)).output
 
 
 
@@ -240,15 +662,26 @@ def _importable_modules(code: CodeBundle) -> list[str]:
 
 
 def static_analysis(code: CodeBundle) -> tuple[str, str]:
-    tmp = Path(tempfile.mkdtemp(prefix="agent-lint-"))
-    try:
-        write_bundle(code, TestSuite(files={}), tmp)
-        r = subprocess.run([PY, "-m", "ruff", "check", "."], cwd=tmp, capture_output=True, text=True, timeout=30)
-        ruff_out = (r.stdout + r.stderr)[-2000:]
-        b = subprocess.run([PY, "-m", "bandit", "-q", "-r", "."], cwd=tmp, capture_output=True, text=True, timeout=30)
-        bandit_out = (b.stdout + b.stderr)[-2000:]
-        return ruff_out, bandit_out
-    except Exception as e:
-        return str(e), ""
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    """``(ruff_output, bandit_output)`` over the generated source.
+
+    Both tools run inside the sandbox image, in the same containment as pytest.
+    That is not tidiness: linting generated code means parsing it, and ruff and
+    bandit both resolve imports and walk the filesystem. Running them as
+    children of the platform process would execute the analysis of
+    model-generated paths with the platform's privileges.
+    """
+    with _bundle_dir("agent-lint-") as tmp:
+        try:
+            write_bundle(code, TestSuite(files={}), tmp)
+            if uses_docker():
+                ruff_out = _exec_in_container(["-m", "ruff", "check", "."], tmp, 60)
+                bandit_out = _exec_in_container(["-m", "bandit", "-q", "-r", "."], tmp, 60)
+                return ruff_out[-2000:], bandit_out[-2000:]
+            r = subprocess.run([PY, "-m", "ruff", "check", "."], cwd=tmp, capture_output=True, text=True, timeout=30)
+            ruff_out = (r.stdout + r.stderr)[-2000:]
+            b = subprocess.run([PY, "-m", "bandit", "-q", "-r", "."], cwd=tmp, capture_output=True, text=True, timeout=30)
+            bandit_out = (b.stdout + b.stderr)[-2000:]
+            return ruff_out, bandit_out
+        except Exception as e:
+            return str(e), ""
+

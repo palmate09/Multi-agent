@@ -1,0 +1,17 @@
+{
+  "approach": "One SQLModel table for books and one for loans, joined by isbn. SQLite in a file under the run directory so the sandbox can import the app.",
+  "decisions": [
+    "SQLite over in-memory so the boot check survives a re-import"
+  ],
+  "risks": [
+    "ISBN validation has no offline authority to check against"
+  ],
+  "edge_cases": [
+    "Duplicate ISBN on insert",
+    "Loan of an already-loaned book"
+  ],
+  "open_questions": [
+    "Should returns be modelled or a loan state change?"
+  ],
+  "structured": true
+}

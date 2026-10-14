@@ -22,7 +22,9 @@ from pathlib import Path
 from typing import Any
 
 from app.config import Settings, get_settings
+from app.db.runs import get_index
 from graph.workflow import NODES, reconstruct_state, run_team
+from sandbox import runner as Runner
 
 log = logging.getLogger("app.runs")
 
@@ -77,13 +79,37 @@ class Run:
         # boundaries. Never killed mid-call — threads cannot be safely killed.
         self.cancel_event = threading.Event()
         self.future: Any = None
+        # Durable mirror of the run row. The filesystem stays authoritative for
+        # artifacts; this is an index, and reconcile() can rebuild it from disk.
+        self.user_id: int | None = options.get("user_id")
+        self._seq = 0
 
     # -- event plumbing -------------------------------------------------
     def emit(self, node: str, phase: str, payload: dict[str, Any]) -> None:
-        event = {"seq": len(self.events), "node": node, "phase": phase, "ts": _now(), **payload}
+        event = {"seq": self._seq, "node": node, "phase": phase, "ts": _now(), **payload}
         with self._cond:
+            self._seq += 1
             self.events.append(event)
             self._cond.notify_all()
+        # Mirrored outside the lock: a slow or unavailable database must not
+        # hold up the SSE stream, which is what the UI is actually watching.
+        get_index().append_event(self.run_id, event["seq"], node, phase, payload)
+
+    def replay_from_db(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Events the in-memory buffer no longer has, read back from the table.
+
+        What a client reconnecting after a restart actually needs: the deque is
+        per-process and per-lifetime, so without this a reconnecting SSE client
+        sees an empty history and a run that was three nodes in looks like it
+        never started.
+        """
+        index = get_index()
+        if not index.enabled:
+            return []
+        with self._cond:
+            have = self._seq
+        rows = index.events(self.run_id, since_seq=have - 1, limit=limit)
+        return rows[1:] if rows else []
 
     def mark_finished(self) -> None:
         with self._cond:
@@ -158,6 +184,9 @@ class Run:
             data["coverage"] = st.coverage.model_dump() if st.coverage else None
             data["memory"] = list(st.memory)
             data["plan"] = st.plan.model_dump() if st.plan else None
+            data["ui"] = st.ui_spec.model_dump() if st.ui_spec else None
+            data["ui_code"] = dict(st.ui_code.files) if st.ui_code else {}
+            data["ui_report"] = st.ui_report.model_dump() if st.ui_report else None
         else:
             data.update(self._artifacts_from_disk())
         return data
@@ -173,6 +202,9 @@ class Run:
             "coverage": None,
             "memory": [],
             "plan": None,
+            "ui": None,
+            "ui_code": {},
+            "ui_report": None,
         }
         if not self.run_dir.exists():
             return out
@@ -183,10 +215,11 @@ class Run:
         spec = self.run_dir / "spec.yaml"
         if spec.exists():
             out["spec"] = spec.read_text()
-        for sub in ("code", "tests"):
+        for sub in ("code", "tests", "ui"):
             root = self.run_dir / sub
             if root.exists():
-                out[sub] = {
+                key = "ui_code" if sub == "ui" else sub
+                out[key] = {
                     str(p.relative_to(root)): p.read_text()
                     for p in sorted(root.rglob("*"))
                     if p.is_file()
@@ -211,6 +244,11 @@ class Run:
         if plan.exists():
             with contextlib.suppress(json.JSONDecodeError):
                 out["plan"] = json.loads(plan.read_text())
+        for name, key in (("ui_contract.json", "ui"), ("ui_report.json", "ui_report")):
+            artifact = self.run_dir / name
+            if artifact.exists():
+                with contextlib.suppress(json.JSONDecodeError):
+                    out[key] = json.loads(artifact.read_text())
         return out
 
     def list_artifacts(self) -> list[str]:
@@ -276,9 +314,44 @@ class RunStore:
     def create(self, requirement: str, run_id: str | None = None, **options: Any) -> Run:
         rid = self.new_id(run_id)
         run = Run(rid, requirement, self.settings.runs_dir / rid, options)
+        self._persist_manifest(run)
         with self._lock:
             self._runs[rid] = run
+        get_index().upsert_run(
+            rid,
+            requirement,
+            "queued",
+            options={k: v for k, v in options.items() if k != "resumed_from"},
+            user_id=run.user_id,
+        )
         return run
+
+    def _persist_manifest(self, run: Run) -> None:
+        """Write ``run.json`` so the directory describes its own run.
+
+        Without it the requirement exists only in memory and in the database, so
+        a restart rebuilds every run from disk with no requirement and the UI
+        shows a column of "(restored run)" -- indistinguishable, which is worse
+        than showing nothing. The filesystem is the artifact store and the
+        documented source of truth after a restart, so it has to carry this.
+        """
+        try:
+            run.run_dir.mkdir(parents=True, exist_ok=True)
+            (run.run_dir / "run.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": run.run_id,
+                        "requirement": run.requirement,
+                        "created_at": run.created_at,
+                        "options": dict(run.options),
+                    },
+                    indent=2,
+                )
+            )
+        except OSError as exc:
+            # Not fatal: the run is already registered in memory and in the
+            # index. Only the post-restart requirement text is lost.
+            log.warning("could not write run.json for %s: %s", run.run_id, exc)
 
     def get(self, run_id: str) -> Run | None:
         with self._lock:
@@ -298,6 +371,10 @@ class RunStore:
         Deleting under a running thread would orphan it: it keeps its pool
         slot, keeps burning LLM quota, and recreates files in the deleted
         directory. Callers must stop() first.
+
+        Any live preview is stopped first. It holds a port and a copy of the
+        code in a working directory derived from this one; leaving it running
+        would serve a run the user believes no longer exists.
         """
         with self._lock:
             run = self._runs.get(run_id)
@@ -306,9 +383,17 @@ class RunStore:
             if run.status in ("queued", "running", "stopping"):
                 raise RunningError(run_id, run.status)
             del self._runs[run_id]
+        from app.services.playground import get_playground
+
+        with contextlib.suppress(Exception):
+            get_playground().stop(run_id)
         import shutil
 
         shutil.rmtree(run.run_dir, ignore_errors=True)
+        # The row cascades to run_events/run_files/preview_sessions. The
+        # directory is already gone, so leaving the row would point an index at
+        # nothing -- reconcile() would drop it, but not until the next restart.
+        get_index().delete_run(run_id)
         return True
 
     def shutdown(self) -> None:
@@ -423,16 +508,34 @@ class RunStore:
         run.status = "running"
         run.updated_at = _now()
         run.emit("pipeline", "start", {"run_id": run.run_id, "nodes": list(NODES)})
+        # `use_docker` is tri-state, and the middle value matters. It used to be
+        # read as `options.get("use_docker", settings.sandbox_use_docker)` and
+        # `sandbox_use_docker` defaulted to False -- so every run ignored
+        # SANDBOX_MODE and executed the generated suite as a subprocess inside
+        # the backend container. That was wrong twice over: no isolation (which
+        # is the entire point of the sandbox), and the runtime image carries no
+        # pytest, so every attempt died with "No module named pytest" and the
+        # run burned all four developer retries before reporting `unresolved`.
+        #
+        # So: an explicit per-run option wins, otherwise defer to whatever
+        # SANDBOX_MODE actually resolved to. `settings.sandbox_use_docker` stays
+        # as the explicit override for deployments that want to pin it.
+        explicit = run.options.get("use_docker")
+        if explicit is None:
+            use_docker = self.settings.sandbox_use_docker or Runner.uses_docker()
+        else:
+            use_docker = bool(explicit)
         try:
             with self._lock:
                 resume_state = self._resume_states.pop(run.run_id, None)
             run.state = run_team(
                 run.requirement,
                 out_dir=str(run.run_dir),
-                use_docker=bool(run.options.get("use_docker", self.settings.sandbox_use_docker)),
+                use_docker=use_docker,
                 skip_tester=bool(run.options.get("skip_tester")),
                 skip_reviewer=bool(run.options.get("skip_reviewer")),
                 skip_reasoner=bool(run.options.get("skip_reasoner")),
+                want_ui=bool(run.options.get("ui")),
                 on_event=run.emit,
                 run_id=run.run_id,
                 cancel=run.cancel_event,
@@ -448,6 +551,19 @@ class RunStore:
             run.updated_at = _now()
             with self._lock:
                 self._active -= 1
+            # The durable copy: status, the summary, and an inventory of what
+            # landed on disk. Best-effort throughout -- the artifacts are the
+            # record, and this is an index of them.
+            get_index().upsert_run(
+                run.run_id,
+                run.requirement,
+                run.status,
+                summary=run.summary,
+                error=run.error,
+                user_id=run.user_id,
+            )
+            if run.run_dir.is_dir():
+                get_index().index_files(run.run_id, run.run_dir)
             run.mark_finished()
 
     def rehydrate(self) -> int:
@@ -463,12 +579,23 @@ class RunStore:
                 if d.name in self._runs:
                     continue
                 requirement = ""
+                # run.json is written when the run is created, so this is the
+                # normal path. The older sources are fallbacks for directories
+                # that predate it -- and the database is the last resort, since
+                # the index is derived from these same directories.
+                manifest = d / "run.json"
+                if manifest.exists():
+                    with contextlib.suppress(json.JSONDecodeError, OSError):
+                        requirement = json.loads(manifest.read_text()).get("requirement", "")
                 stories_file = d / "stories.json"
-                if stories_file.exists():
+                if not requirement and stories_file.exists():
                     try:
                         requirement = json.loads(stories_file.read_text()).get("requirement", "")
                     except json.JSONDecodeError:
                         requirement = ""
+                if not requirement:
+                    with contextlib.suppress(Exception):
+                        requirement = get_index().requirement(d.name) or ""
                 run = Run(d.name, requirement or "(restored run)", d, {})
                 summary_file = d / "summary.json"
                 run.status = "restored"
@@ -478,4 +605,25 @@ class RunStore:
                 run.mark_finished()
                 self._runs[d.name] = run
             count += 1
+        if count or get_index().enabled:
+            # The filesystem is authoritative; the index is derived. Bring the
+            # index into line with what is actually on disk rather than
+            # trusting whatever the last process wrote there.
+            try:
+                stats = get_index().reconcile(
+                    (d.name, d)
+                    for d in sorted(root.iterdir())
+                    if d.is_dir() and _SAFE_ID.match(d.name)
+                )
+                if get_index().enabled and any(stats.values()):
+                    log.info(
+                        "run index reconciled: %d indexed, %d removed, %d skipped",
+                        stats["indexed"],
+                        stats["removed"],
+                        stats["skipped"],
+                    )
+            except Exception:
+                # Reconciliation is an optimisation over the filesystem, never a
+                # precondition for serving runs.
+                log.exception("run index reconciliation failed; filesystem remains authoritative")
         return count

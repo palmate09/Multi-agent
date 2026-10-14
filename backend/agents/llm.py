@@ -13,8 +13,8 @@ There is deliberately **no template fallback**. Substituting a built-in
 task-manager app for a failed generation produced runs that reported
 ``accepted`` while ignoring the requested domain entirely.
 
-Reasoning is opt-in per role (``LLM_REASONING_ROLES``): a role that asks for it
-gets a model that thinks before answering, and the thinking comes back in
+Reasoning is opt-in per role (``LLM_REASONING_ROLES``): a role that asks for
+it gets a model that thinks before answering, and the thinking comes back in
 ``meta["reasoning"]`` rather than mixed into the answer. A ``<thinking>`` block
 in front of the Designer's YAML is a parse failure, not a plan.
 
@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -56,22 +57,65 @@ _OLLAMA_OK: dict[str, Any] = {"probed": False, "models": set()}
 # sets this per run; the default keeps ad-hoc/CLI calls working.
 _RUN_SCOPE: ContextVar[str] = ContextVar("agent_team_run_scope", default="")
 
-# Why each backend declined, for the current generate() call. Every backend
-# swallows its own exception and returns None so one failure never breaks the
-# pipeline -- which previously also erased the reason, leaving a run silently
-# reporting model=template with no explanation of what went wrong.
-_FAILURES: list[str] = []
 
-# Set by a backend to the id that actually served the request, so the logged
-# model is the real one rather than the routing label.
-_LAST_MODEL: list[str] = []
+class _CallState(threading.local):
+    """Everything one in-flight ``generate()`` needs to remember.
 
-# Thinking captured by the backend that served the last call, deliberately kept
-# out of the answer text. Backends append; generate() takes and clears it
-# through _take_reasoning(), so an attempt that reasoned before returning an
-# empty string never leaks its thoughts into the next attempt's metadata.
-_LAST_REASONING: list[str] = []
-_LAST_REASONING_TOKENS: list[int] = []
+    Thread-local, not module-global, and that is load-bearing rather than
+    tidy. ``RunStore`` executes runs on a ``ThreadPoolExecutor`` sized by
+    ``max_concurrent_runs``, so two pipelines call ``generate()`` at the same
+    time; the fix loop additionally issues ``triage`` and ``reflection``
+    concurrently, on the same thread but as two separate calls. With shared
+    module lists, one call's ``_FAILURES.clear()`` erases the other's failure
+    reasons mid-flight, ``_LAST_MODEL[-1]`` credits the wrong backend, and one
+    role's thinking is attributed to the next role's answer.
+    """
+
+    def __init__(self) -> None:
+        # Why each backend declined, for the current generate() call. Every
+        # backend swallows its own exception and returns None so one failure
+        # never breaks the pipeline -- which previously also erased the
+        # reason, leaving a run silently reporting model=template with no
+        # explanation of what went wrong.
+        self.failures: list[str] = []
+        # Set by a backend to the id that actually served the request, so the
+        # logged model is the real one rather than the routing label.
+        self.model: list[str] = []
+        # Thinking captured by the backend that served the last call,
+        # deliberately kept out of the answer text. Backends append;
+        # generate() takes and clears it through _take_reasoning(), so an
+        # attempt that reasoned before returning an empty string never leaks
+        # its thoughts into the next attempt's metadata.
+        self.reasoning: list[str] = []
+        self.reasoning_tokens: list[int] = []
+        # Token accounting for the call that just completed, in the same shape
+        # whichever backend served it. A backend that cannot report usage
+        # leaves it empty rather than guessing, so the eval harness can tell
+        # "no data" from zero.
+        self.usage: list[dict] = []
+
+
+_CALL = _CallState()
+
+# The most recent completed call, published for the diagnostics endpoints.
+# Those are served on request threads, which have no in-flight call of their
+# own, so they read this snapshot rather than one run's working state.
+_last_call_lock = threading.Lock()
+_last_call: dict[str, Any] = {}
+
+
+def publish_last_call(**fields: Any) -> None:
+    """Record the outcome of a completed call for ``/api/llm``."""
+    global _last_call
+    with _last_call_lock:
+        _last_call = dict(fields)
+
+
+def last_call() -> dict[str, Any]:
+    """The most recent completed call, whichever run made it."""
+    with _last_call_lock:
+        return dict(_last_call)
+
 
 # Roles whose output is long or structurally demanding. Everything else uses the
 # faster small model; see role_model() for the throughput measurements.
@@ -98,10 +142,20 @@ _NUM_PREDICT = {
     "reflection": 800,
 }
 
+# Floors applied on the hosted paths only. The table above is sized for local
+# CPU inference, where the cap is also the wall-clock: 8000 tokens at ~12 tok/s
+# is eleven minutes. Hosted reasoning models spend a large slice of their budget
+# thinking before emitting a visible token, and the roles that produce genuinely
+# large artifacts -- the Designer's OpenAPI YAML, the Developer's multi-file
+# bundle, the Tester's suite -- truncate below the local figure in practice.
+# The roles that do *not* need this keep the table's value, which is the whole
+# point: `triage` emits one word and `reflection` two or three sentences.
+_HOSTED_FLOOR = {"designer": 8000, "developer": 8000, "tester": 8000}
+
 
 def _note_failure(name: str, exc: BaseException) -> None:
     detail = str(exc).strip().replace("\n", " ")[:200]
-    _FAILURES.append(f"{name}: {type(exc).__name__} {detail}".strip())
+    _CALL.failures.append(f"{name}: {type(exc).__name__} {detail}".strip())
 
 
 def set_run_scope(run_id: str) -> None:
@@ -120,6 +174,27 @@ _CANCEL_SCOPE: ContextVar = ContextVar("agent_team_cancel", default=None)
 
 def set_cancel(event) -> None:
     _CANCEL_SCOPE.set(event)
+
+
+def thread_call(fn, *args, **kwargs):
+    """A zero-arg callable that runs ``fn`` on a thread inheriting this scope.
+
+    The cache scope and the cancel signal are ContextVars, and a thread-pool
+    worker starts with neither. Handing ``set_run_scope``-less work to a pool
+    would cache its completion under the empty default scope, so a later run
+    sending the same prompt would be served this run's answer verbatim -- the
+    exact failure the run scope exists to prevent. The fix loop issues
+    ``triage`` and ``reflection`` together through this wrapper.
+    """
+    scope = _RUN_SCOPE.get()
+    cancel = _CANCEL_SCOPE.get()
+
+    def _run():
+        _RUN_SCOPE.set(scope)
+        _CANCEL_SCOPE.set(cancel)
+        return fn(*args, **kwargs)
+
+    return _run
 
 
 def clear_cache() -> None:
@@ -216,13 +291,14 @@ def _ollama(
         body["think"] = True
     try:
         out = _post_json(f"{OLLAMA_URL}/api/generate", body, timeout=timeout)
+        _note_ollama_usage(out)
         if out.get("done_reason") == "length":
             _note_failure(
                 f"ollama/{model}", f"truncated at num_predict={num_predict} (done_reason=length)"
             )
         thinking = (out.get("thinking") or "").strip()
         if thinking:
-            _LAST_REASONING.append(thinking)
+            _CALL.reasoning.append(thinking)
         return out.get("response", "")
     except Exception as exc:
         _note_failure(f"ollama/{model}", exc)
@@ -323,15 +399,16 @@ def _gemini(prompt: str, system: str, timeout: int, role: str = "") -> str | Non
             if m.strip()
         ]
     )
-    # Generous ceiling: the flash models spend output tokens on reasoning before
-    # answering, and a small cap returns empty content with finishReason
-    # MAX_TOKENS, which reads as a generation failure.
-    max_out = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "") or 8192)
+    # Per-role ceiling, from the same table the local path uses. The old
+    # hardcoded 8192 ignored it, and reasoning calls added the thinking budget
+    # on top -- so `triage` asked for 16,384 tokens to answer with one word.
+    max_out = hosted_max_tokens(role, "GEMINI_MAX_OUTPUT_TOKENS")
     thinking = reasoning_requested(role)
     budget = reasoning_budget(role)
     for model in models:
         # A failed attempt's thinking must not ride into the next model's answer.
         _take_reasoning()
+        _take_usage()
         try:
             cfg: dict = {"temperature": 0.1, "maxOutputTokens": max_out}
             if thinking:
@@ -346,19 +423,45 @@ def _gemini(prompt: str, system: str, timeout: int, role: str = "") -> str | Non
                 },
                 timeout=timeout,
             )
+            _note_gemini_usage(out)
+            # Truncation is a failure, not a short answer. Without this the
+            # Designer's YAML simply stops mid-document and the parser reports
+            # a malformed generation with no hint that the cap was the cause.
+            truncated = _gemini_truncated(out, max_out)
             answer, thoughts = _gemini_parts(out)
             if answer:
                 if thoughts:
-                    _LAST_REASONING.append(thoughts)
-                used = (out.get("usageMetadata") or {}).get("thoughtsTokenCount")
-                if isinstance(used, int) and used > 0:
-                    _LAST_REASONING_TOKENS.append(used)
-                _LAST_MODEL.append(f"gemini/{model}")
+                    _CALL.reasoning.append(thoughts)
+                if truncated:
+                    _note_failure(f"gemini/{model}", truncated)
+                _CALL.model.append(f"gemini/{model}")
                 return answer
-            _note_failure(f"gemini/{model}", f"empty content: {str(out)[:160]}")
+            why = truncated or f"empty content: {str(out)[:160]}"
+            _note_failure(f"gemini/{model}", why)
         except Exception as exc:
             _note_failure(f"gemini/{model}", exc)
     return None
+
+
+def _gemini_truncated(out: dict, max_out: int) -> str:
+    """A description of Gemini hitting ``maxOutputTokens``, or ``""``."""
+    for cand in out.get("candidates") or []:
+        if str(cand.get("finishReason") or "").upper() in {"MAX_TOKENS", "MAX_OUTPUT_TOKENS"}:
+            return (
+                f"truncated at maxOutputTokens={max_out} (finishReason=MAX_TOKENS); "
+                f"raise LLM_MAX_TOKENS for this role or lower LLM_REASONING_BUDGET"
+            )
+    return ""
+
+
+def _note_gemini_usage(out: dict) -> None:
+    usage = out.get("usageMetadata") or {}
+    _note_usage(
+        prompt=usage.get("promptTokenCount", 0),
+        completion=usage.get("candidatesTokenCount", 0),
+        reasoning=usage.get("thoughtsTokenCount", 0),
+        total=usage.get("totalTokenCount", 0),
+    )
 
 
 def _gemini_thinking_config(budget: int) -> dict:
@@ -438,6 +541,7 @@ def _openai_compat(
         if reasoning_body:
             payload.update(reasoning_body)
         out = _post_json_retry(url, payload, headers=headers, timeout=timeout)
+        _note_openai_usage(out)
         choice = out["choices"][0]
         message = choice.get("message") or {}
         content = message.get("content") or ""
@@ -446,14 +550,23 @@ def _openai_compat(
         # Either way it must never be handed back as the answer.
         reasoning = (message.get("reasoning") or message.get("reasoning_content") or "").strip()
         answer, inline = _strip_thinking(content)
+        finish = choice.get("finish_reason")
         if not answer.strip():
             # Reasoning models return an empty message when the ceiling is
             # consumed before any visible output.
-            finish = choice.get("finish_reason")
             why = ", reasoning consumed the budget" if reasoning else ""
             raise ValueError(f"empty content (finish_reason={finish}, max_tokens={budget}){why}")
+        if finish == "length":
+            # The answer arrived but the model was still going. Say so: a
+            # half-written file parses as a malformed generation, and the cap
+            # is the only thing that could have caused it.
+            _note_failure(
+                "openai-compat",
+                f"truncated at max_tokens={budget} (finish_reason=length); "
+                f"raise LLM_MAX_TOKENS for this role",
+            )
         if reasoning or inline:
-            _LAST_REASONING.append(reasoning or inline)
+            _CALL.reasoning.append(reasoning or inline)
         return answer
     except Exception as exc:
         detail = str(exc)
@@ -494,11 +607,11 @@ def _groq(prompt: str, system: str, timeout: int, role: str = "") -> str | None:
             prompt,
             system,
             timeout,
-            max_tokens=8192,
+            max_tokens=hosted_max_tokens(role),
             reasoning_body=_reasoning_body("groq", m, role) if wants else None,
         )
         if text:
-            _LAST_MODEL.append(f"groq/{m}")
+            _CALL.model.append(f"groq/{m}")
             return text
     return None
 
@@ -527,10 +640,11 @@ def _openrouter(prompt: str, system: str, timeout: int, role: str = "") -> str |
             system,
             timeout,
             {"HTTP-Referer": "https://localhost", "X-Title": "multi-agent-team"},
+            max_tokens=hosted_max_tokens(role),
             reasoning_body=_reasoning_body("openrouter", m, role) if wants else None,
         )
         if text:
-            _LAST_MODEL.append(f"openrouter/{m}")
+            _CALL.model.append(f"openrouter/{m}")
             return text
     return None
 
@@ -541,7 +655,13 @@ def _github_models(prompt: str, system: str, timeout: int, role: str = "") -> st
         return None
     model = os.getenv("GITHUB_MODEL", "openai/gpt-4o-mini")
     return _openai_compat(
-        "https://models.github.ai/inference/chat/completions", key, model, prompt, system, timeout
+        "https://models.github.ai/inference/chat/completions",
+        key,
+        model,
+        prompt,
+        system,
+        timeout,
+        max_tokens=hosted_max_tokens(role),
     )
 
 
@@ -559,12 +679,13 @@ def _huggingface(prompt: str, system: str, timeout: int, role: str = "") -> str 
                     {"role": "system", "content": system},
                     {"role": "user", "content": prompt},
                 ],
-                "max_tokens": 3000,
+                "max_tokens": hosted_max_tokens(role),
                 "temperature": 0.1,
             },
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
             timeout=timeout,
         )
+        _note_openai_usage(out)
         return out["choices"][0]["message"]["content"]
     except Exception as exc:
         _note_failure("openai-compat", exc)
@@ -587,11 +708,12 @@ def _openai(prompt: str, system: str, timeout: int, role: str = "") -> str | Non
                     {"role": "user", "content": prompt},
                 ],
                 "temperature": 0.1,
-                "max_tokens": 3000,
+                "max_tokens": hosted_max_tokens(role),
             },
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
             timeout=timeout,
         )
+        _note_openai_usage(out)
         return out["choices"][0]["message"]["content"]
     except Exception as exc:
         _note_failure("openai-compat", exc)
@@ -624,6 +746,29 @@ def role_num_predict(role: str) -> int:
     if override and override.isdigit():
         return int(override)
     return _NUM_PREDICT.get(role, 3000)
+
+
+def hosted_max_tokens(role: str, *extra_env: str) -> int:
+    """Completion ceiling for a hosted backend, from the same per-role table.
+
+    The hosted paths used to hardcode their own value and ignore the table
+    entirely: Gemini read ``GEMINI_MAX_OUTPUT_TOKENS`` (default 8192) and Groq
+    passed ``max_tokens=8192`` to the shared OpenAI-compatible helper -- which
+    then routed reasoning calls through ``_reasoning_max_tokens`` and *doubled*
+    it. Since ``triage`` and ``reflection`` are both in
+    ``_DEFAULT_REASONING_ROLES``, the two cheapest calls in the pipeline were
+    requested with a 16,384-token ceiling, on every failed fix-loop iteration.
+
+    ``_HOSTED_FLOOR`` raises the three genuinely long-output roles; everything
+    else uses the table. Overrides, most specific first:
+    ``LLM_MAX_TOKENS_<ROLE>``, ``LLM_MAX_TOKENS``, then any provider-specific
+    name the caller passes (``GEMINI_MAX_OUTPUT_TOKENS`` for Gemini).
+    """
+    for name in (f"LLM_MAX_TOKENS_{role.upper()}", "LLM_MAX_TOKENS", *extra_env):
+        raw = (os.getenv(name, "") or "").strip()
+        if raw.isdigit() and int(raw) > 0:
+            return int(raw)
+    return max(_NUM_PREDICT.get(role, 3000), _HOSTED_FLOOR.get(role, 0))
 
 
 def reasoning_requested(role: str) -> bool:
@@ -738,12 +883,64 @@ def _reasoning_max_tokens(base: int) -> int:
     return max(base * 2, floor)
 
 
+def _note_usage(**counts: int) -> None:
+    """Record what the serving backend billed, in a backend-neutral shape.
+
+    Omitted counts stay absent rather than becoming 0, so "this backend does
+    not report token counts" is distinguishable from "it reported none". The
+    reasoning slice is also folded into ``_CALL.reasoning_tokens`` so callers
+    reading ``meta["reasoning_tokens"]`` keep working across every backend,
+    not just Gemini.
+    """
+    _CALL.usage.append({k: int(v) for k, v in counts.items() if isinstance(v, int) and v >= 0})
+    reasoning = counts.get("reasoning")
+    if isinstance(reasoning, int) and reasoning > 0:
+        _CALL.reasoning_tokens.append(reasoning)
+
+
+def _take_usage() -> dict:
+    """Hand over and clear the usage recorded by the last backend call."""
+    usage: dict = {}
+    for entry in _CALL.usage:
+        usage.update(entry)
+    _CALL.usage.clear()
+    return usage
+
+
+def _note_openai_usage(out: dict) -> None:
+    """Record usage from an OpenAI-shaped response body.
+
+    ``completion_tokens_details`` carries the reasoning slice on both Groq and
+    OpenRouter; a provider that omits it leaves ``reasoning`` absent, which the
+    harness reads as "not reported" rather than "zero".
+    """
+    usage = out.get("usage") or {}
+    if not isinstance(usage, dict):
+        return
+    details = usage.get("completion_tokens_details") or {}
+    _note_usage(
+        prompt=usage.get("prompt_tokens", 0),
+        completion=usage.get("completion_tokens", 0),
+        total=usage.get("total_tokens", 0),
+    )
+    if isinstance(details, dict) and isinstance(details.get("reasoning_tokens"), int):
+        _note_usage(reasoning=details["reasoning_tokens"])
+
+
+def _note_ollama_usage(out: dict) -> None:
+    """Ollama reports counts under different names from every hosted tier."""
+    _note_usage(
+        prompt=out.get("prompt_eval_count", 0),
+        completion=out.get("eval_count", 0),
+    )
+
+
 def _take_reasoning() -> tuple[str, int]:
     """Hand over and clear the thinking captured by the last backend call."""
-    text = "".join(_LAST_REASONING)
-    tokens = sum(_LAST_REASONING_TOKENS)
-    _LAST_REASONING.clear()
-    _LAST_REASONING_TOKENS.clear()
+    text = "".join(_CALL.reasoning)
+    tokens = sum(_CALL.reasoning_tokens)
+    _CALL.reasoning.clear()
+    _CALL.reasoning_tokens.clear()
     return text, tokens
 
 
@@ -896,9 +1093,10 @@ def generate(
             "reasoning_tokens": 0,
         }
     t0 = time.time()
-    _FAILURES.clear()
-    _LAST_MODEL.clear()
+    _CALL.failures.clear()
+    _CALL.model.clear()
     _take_reasoning()
+    _take_usage()
     skip_local = os.getenv("SKIP_OLLAMA", "") == "1"
     # When set, a local model is the only acceptable backend. Prevents a hosted
     # tier quietly standing in for a local run whose output you are inspecting.
@@ -912,18 +1110,20 @@ def generate(
         timeout = int(os.getenv("LLM_TIMEOUT", "") or default)
     text, model = "", ""
     reasoning_text, reasoning_tokens = "", 0
+    usage: dict = {}
 
     def _try_cloud() -> None:
-        nonlocal text, model, reasoning_text, reasoning_tokens
+        nonlocal text, model, reasoning_text, reasoning_tokens, usage
         for fn, name in cloud_order():
             text = fn(prompt, system, timeout, role)
             # Taken on every attempt, successful or not: a backend that
             # reasoned and then returned nothing must not have its thinking
             # attributed to whichever backend answers next.
             captured, tokens = _take_reasoning()
+            usage = _take_usage()
             if text:
                 # Report the concrete model that served, not the routing label.
-                model = _LAST_MODEL[-1] if _LAST_MODEL else name
+                model = _CALL.model[-1] if _CALL.model else name
                 reasoning_text, reasoning_tokens = captured, tokens
                 return
 
@@ -932,15 +1132,24 @@ def generate(
     if not text and not skip_local:
         local_model = role_model(role)
         if _ollama_available(local_model):
+            # The shared timeout is sized for hosted calls (120s). CPU
+            # inference needs far longer (a 4000-token developer answer at
+            # ~12 tok/s takes ~5 minutes), so the local attempt gets its own
+            # ceiling. Without this a groq->ollama fallback always timed out.
+            try:
+                local_timeout = int(os.getenv("OLLAMA_TIMEOUT", "") or 0) or timeout
+            except ValueError:
+                local_timeout = timeout
             text = _ollama(
                 prompt,
                 system,
                 local_model,
                 num_predict=role_num_predict(role),
-                timeout=timeout,
+                timeout=local_timeout,
                 role=role,
             )
             captured, tokens = _take_reasoning()
+            usage = _take_usage()
             if text:
                 model = f"ollama/{local_model}"
                 reasoning_text, reasoning_tokens = captured, tokens
@@ -957,7 +1166,7 @@ def generate(
             del CACHE[next(iter(CACHE))]
     else:
         model = model or "none"
-    errors = list(_FAILURES)
+    errors = list(_CALL.failures)
     _log(
         {
             "role": role,
@@ -969,6 +1178,12 @@ def generate(
             # same text the parsers saw.
             "reasoning": reasoning_text[:2000],
             "reasoning_tokens": reasoning_tokens,
+            # What this role was allowed to spend, and what it actually spent.
+            # The pair is the whole latency story: a role whose ceiling is two
+            # orders of magnitude above its output is a latency defect, and
+            # this is the only place that is visible.
+            "max_output_tokens": hosted_max_tokens(role),
+            "usage": usage,
             # Why the fallbacks declined. Without this a retired model id, a
             # refused connection or a truncated answer is indistinguishable
             # from a healthy run.
@@ -979,8 +1194,18 @@ def generate(
     # Always present, so callers can read it without a membership test.
     meta["reasoning"] = reasoning_text[:4000]
     meta["reasoning_tokens"] = reasoning_tokens
+    meta["usage"] = usage
     if not text:
         meta["errors"] = errors or [f"no backend answered (role={role})"]
+    publish_last_call(
+        role=role,
+        model=model,
+        ok=bool(text),
+        latency=latency,
+        failures=errors,
+        max_output_tokens=hosted_max_tokens(role),
+        usage=usage,
+    )
     return text, meta
 
 

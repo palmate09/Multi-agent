@@ -535,7 +535,7 @@ def test_openai_compat_returns_the_answer_and_captures_the_reasoning(monkeypatch
             ]
         },
     )
-    llm._LAST_REASONING.clear()
+    llm._CALL.reasoning.clear()
     text = llm._openai_compat(
         "https://api.groq.com/openai/v1/chat/completions",
         "key",
@@ -546,7 +546,7 @@ def test_openai_compat_returns_the_answer_and_captures_the_reasoning(monkeypatch
         reasoning_body={"include_reasoning": True},
     )
     assert text == "the answer"
-    assert llm._LAST_REASONING == ["step by step I decided"]
+    assert llm._CALL.reasoning == ["step by step I decided"]
 
 
 def test_openai_compat_strips_raw_format_thinking_from_the_answer(monkeypatch):
@@ -563,7 +563,7 @@ def test_openai_compat_strips_raw_format_thinking_from_the_answer(monkeypatch):
             ]
         },
     )
-    llm._LAST_REASONING.clear()
+    llm._CALL.reasoning.clear()
     text = llm._openai_compat(
         "https://api.groq.com/openai/v1/chat/completions",
         "key",
@@ -574,7 +574,7 @@ def test_openai_compat_strips_raw_format_thinking_from_the_answer(monkeypatch):
         reasoning_body={"reasoning_format": "raw"},
     )
     assert text == "\nthe answer"
-    assert llm._LAST_REASONING == ["<thinking>hmm</thinking>"]
+    assert llm._CALL.reasoning == ["<thinking>hmm</thinking>"]
 
 
 def test_reasoning_model_reports_why_the_content_came_back_empty(monkeypatch):
@@ -588,8 +588,8 @@ def test_reasoning_model_reports_why_the_content_came_back_empty(monkeypatch):
             ]
         },
     )
-    llm._LAST_REASONING.clear()
-    llm._FAILURES.clear()
+    llm._CALL.reasoning.clear()
+    llm._CALL.failures.clear()
     text = llm._openai_compat(
         "https://api.groq.com/openai/v1/chat/completions",
         "key",
@@ -600,8 +600,8 @@ def test_reasoning_model_reports_why_the_content_came_back_empty(monkeypatch):
         reasoning_body={"include_reasoning": True},
     )
     assert text is None
-    assert not llm._LAST_REASONING, "a failed attempt must not leave its thinking behind"
-    assert any("reasoning consumed the budget" in f for f in llm._FAILURES)
+    assert not llm._CALL.reasoning, "a failed attempt must not leave its thinking behind"
+    assert any("reasoning consumed the budget" in f for f in llm._CALL.failures)
 
 
 def test_gemini_thinking_parts_never_reach_the_answer():
@@ -627,8 +627,8 @@ def test_gemini_sends_a_thinking_config_only_when_the_role_asks(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.delenv("GEMINI_MODEL", raising=False)
     monkeypatch.setenv("GEMINI_MODELS", "gemini-3-flash-preview")
-    llm._LAST_MODEL.clear()
-    llm._LAST_REASONING.clear()
+    llm._CALL.model.clear()
+    llm._CALL.reasoning.clear()
     seen = {}
 
     def fake_post(url, payload, headers=None, timeout=60):
@@ -637,18 +637,19 @@ def test_gemini_sends_a_thinking_config_only_when_the_role_asks(monkeypatch):
 
     monkeypatch.setattr(llm, "_post_json", fake_post)
 
-    # Reasoning off for this role: no thinkingConfig, untouched token ceiling.
+    # Reasoning off for this role: no thinkingConfig, and the ceiling comes
+    # from the role's own budget rather than a hardcoded 8192.
     monkeypatch.setenv("LLM_REASONING_ROLES", "reviewer")
     assert llm._gemini("p", "s", 30, role="pm") == "ok"
     assert "thinkingConfig" not in seen
-    assert seen["maxOutputTokens"] == 8192
+    assert seen["maxOutputTokens"] == llm.role_num_predict("pm")
 
     # Reasoning on: thinkingConfig present and the ceiling grows by the budget.
     monkeypatch.setenv("LLM_REASONING_ROLES", "pm")
     monkeypatch.setenv("LLM_REASONING_BUDGET", "2048")
     assert llm._gemini("p", "s", 30, role="pm") == "ok"
     assert seen["thinkingConfig"] == {"includeThoughts": True, "thinkingBudget": 2048}
-    assert seen["maxOutputTokens"] == 8192 + 2048
+    assert seen["maxOutputTokens"] == llm.role_num_predict("pm") + 2048
 
 
 def test_generate_surfaces_reasoning_in_meta_and_log(monkeypatch):
@@ -700,3 +701,99 @@ def test_cached_call_reports_no_reasoning(monkeypatch):
     assert second["reasoning"] == ""
     assert second["reasoning_tokens"] == 0
     assert first["reasoning"] == ""
+
+
+# ------------------------------------------------- groq -> ollama fallback --
+def _rig_ollama_present(monkeypatch, model="qwen2.5-coder:3b"):
+    """Pretend this Ollama model is pulled, without touching the network."""
+    monkeypatch.delenv("AGENT_TEAM_TESTING", raising=False)
+    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
+    monkeypatch.delenv("OLLAMA_MODEL_DEVELOPER", raising=False)
+    llm._OLLAMA_OK["probed"] = True
+    llm._OLLAMA_OK["models"] = {model}
+
+
+def _unrig_ollama():
+    llm._OLLAMA_OK["probed"] = False
+    llm._OLLAMA_OK["models"] = set()
+    llm.set_run_scope("")
+    llm.CACHE.clear()
+
+
+def test_cloud_failure_falls_back_to_ollama(monkeypatch):
+    """Groq exhausted (429) -> the loaded Ollama answers instead of ok=False."""
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    monkeypatch.setenv("SKIP_OLLAMA", "0")
+    monkeypatch.setenv("PREFER_LOCAL_ONLY", "0")
+    _rig_ollama_present(monkeypatch)
+    llm.CACHE.clear()
+    llm.set_run_scope("fallback-test")
+
+    def no_cloud(prompt, system, timeout, role=""):
+        llm._note_failure("groq/qwen/qwen3.8-27b", "HTTP 429 rate limit exceeded")
+        return None
+
+    monkeypatch.setattr(llm, "_groq", no_cloud)
+    monkeypatch.setattr(llm, "_ollama", lambda *a, **k: "from ollama")
+
+    try:
+        text, meta = llm.generate("fall back please", role="developer")
+    finally:
+        _unrig_ollama()
+    assert text == "from ollama"
+    assert meta["ok"] is True
+    assert meta["model"] == "ollama/qwen2.5-coder:3b"
+    assert any("groq" in f for f in meta["failures"]), "the groq 429 must be logged"
+
+
+def test_ollama_fallback_attempt_uses_ollama_timeout(monkeypatch):
+    """LLM_TIMEOUT is sized for hosted calls; the CPU attempt needs OLLAMA_TIMEOUT."""
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("LLM_TIMEOUT", "120")
+    monkeypatch.setenv("OLLAMA_TIMEOUT", "600")
+    monkeypatch.setenv("SKIP_OLLAMA", "0")
+    monkeypatch.setenv("PREFER_LOCAL_ONLY", "0")
+    _rig_ollama_present(monkeypatch)
+    llm.CACHE.clear()
+    llm.set_run_scope("fallback-timeout")
+
+    monkeypatch.setattr(llm, "_groq", lambda *a, **k: None)
+    seen = {}
+
+    def fake_ollama(prompt, system, model, num_predict, timeout, role=""):
+        seen["timeout"] = timeout
+        return "ok"
+
+    monkeypatch.setattr(llm, "_ollama", fake_ollama)
+    try:
+        text, _meta = llm.generate("timeout check", role="developer")
+    finally:
+        _unrig_ollama()
+    assert text == "ok"
+    assert seen["timeout"] == 600
+
+
+def test_skip_ollama_disables_the_cloud_fallback(monkeypatch):
+    """SKIP_OLLAMA=1 is the switch that keeps a hosted run hosted-only."""
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("SKIP_OLLAMA", "1")
+    monkeypatch.setenv("PREFER_LOCAL_ONLY", "0")
+    llm.CACHE.clear()
+    llm.set_run_scope("no-fallback")
+
+    monkeypatch.setattr(llm, "_groq", lambda *a, **k: None)
+    called = []
+
+    def spy_ollama(*a, **k):
+        called.append(True)
+        return "must not be used"
+
+    monkeypatch.setattr(llm, "_ollama", spy_ollama)
+    try:
+        text, meta = llm.generate("stay on groq", role="developer")
+    finally:
+        _unrig_ollama()
+    assert text == ""
+    assert meta["ok"] is False
+    assert not called, "ollama was contacted despite SKIP_OLLAMA=1"

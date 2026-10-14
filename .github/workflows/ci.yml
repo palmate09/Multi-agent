@@ -28,12 +28,14 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: backend/requirements.txt
+          # The dev file, not the runtime one: pytest/ruff/bandit are needed
+          # here but are deliberately absent from the backend image.
+          cache-dependency-path: backend/requirements-dev.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt ruff bandit
+          pip install -r requirements-dev.txt
 
       - name: Lint
         run: ruff check app agents graph schemas evals tests
@@ -68,7 +70,7 @@ jobs:
           bandit -q -r app agents graph schemas -s B110,B310
 
   frontend:
-    name: Frontend typecheck + build
+    name: Frontend lint, test, typecheck + build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -85,16 +87,76 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Lint
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
       - name: Typecheck
         run: npm run typecheck
+
+      # Unit + component tests, including the jest-axe accessibility
+      # assertions. These run in jsdom and need no backend.
+      - name: Unit tests
+        run: npm run test
 
       - name: Build
         run: npm run build
 
+  frontend-e2e:
+    name: Frontend end-to-end
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      # Playwright drives the REAL FastAPI server (see
+      # FRONTEND_IMPROVEMENT_PLAN.md 7.1). No LLM keys are configured, so runs
+      # terminate `blocked` deterministically; the finished run the suite
+      # reads comes from e2e/fixtures/seed_run.py, not from a model.
+      - name: Install backend dependencies
+        run: pip install -r ../backend/requirements.txt
+
+      - name: Install frontend dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Seed a finished run
+        run: python e2e/fixtures/seed_run.py e2e/fixtures/runs
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run end-to-end tests
+        run: npm run test:e2e
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          retention-days: 7
+
   images:
     name: Build container images
     runs-on: ubuntu-latest
-    needs: [backend, frontend]
+    needs: [backend, frontend, frontend-e2e]
     permissions:
       contents: read
     steps:

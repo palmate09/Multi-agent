@@ -1,6 +1,7 @@
 # Multi-Agent Software Team
 
-5 LLM agents turn plain English into a tested, reviewed FastAPI REST API.
+5 LLM agents turn plain English into a tested, reviewed FastAPI REST API — and,
+if you ask, a static web UI for it that you can click on and use.
 
 Bring your own model: a Gemini API key (a run takes 1-2 minutes) or local
 Ollama (free and private, but 3-6 minutes on CPU). There is **no template
@@ -8,8 +9,9 @@ fallback** — if generation fails the run reports `blocked` and says why, rathe
 than quietly substituting a built-in answer.
 
 Ships with a web UI (React + Vite behind nginx), a FastAPI backend that streams
-agent progress over SSE, Docker images for both, and a CI/CD pipeline that
-deploys to a GCP VM.
+agent progress over SSE, a live playground that boots the generated app in a
+hardened container and serves it at `/preview/<run_id>/`, Docker images for
+both, and a CI/CD pipeline that deploys to a GCP VM.
 
 ## Architecture
 
@@ -17,13 +19,57 @@ deploys to a GCP VM.
 Requirement -> PM (stories) -> Reasoner (plan: approach/risks/edge cases)
   -> Designer (OpenAPI + file plan) -> Developer
   -> domain coverage gate -> boot check -> Tester || (developer self-checks)
-  -> Sandbox Runner -> triage+reflection -> Developer -> Reviewer (ruff+bandit) -> done
+  -> Sandbox Runner (container, internal net) -> triage+reflection -> Developer
+  -> UI designer -> UI developer -> UI gate (advisory)      [opt-in]
+  -> Reviewer (ruff+bandit) -> done
 ```
 
 ```
-browser ──> Caddy ──> nginx (SPA + /api proxy) ──> FastAPI ──> agents
-                                                           └──> pytest sandbox
+browser ──> Caddy ──> nginx (SPA + /api + /preview proxy) ──> FastAPI ──> agents
+                                                                 ├──> sandbox sidecar  (owns docker.sock; the ONLY service
+                                                                 │      on sandbox-net, so it can both start and reach
+                                                                 │      the containers)
+                                                                 │      ├─> pytest container   (sandbox-net, internal, no egress)
+                                                                 │      └─> preview container  (sandbox-net, internal, no egress)
+                                                                 ├──> Postgres (inner net; runs index, sessions, rate limits)
+                                                                 └──> Ollama (optional, inner net)
+
+The backend is deliberately NOT on `sandbox-net`: that keeps the platform's own
+API out of reach of model-generated code. The sidecar spans both networks, so
+preview traffic is relayed through it (`/sandbox/proxy/<id>/…`) rather than
+dialled directly.
+
+## Deploying it
+
+`./start.sh --prod` runs the same topology behind Caddy, with Postgres and
+authentication required:
+
+```bash
+./deploy/bootstrap-env.sh                       # credentials, printed once
+./start.sh --prod                               # or the raw command:
+docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d --build
 ```
+
+Then browse the host's IP. `PREVIEW_ALLOW_START` defaults to **off** there,
+because on an internet-facing host "run the generated code" should be a
+decision; set it to `1` in `.env` to enable the Playground.
+
+## Running it
+
+```bash
+./start.sh            # build if needed, start, wait until healthy, print URLs
+./start.sh --db       # also start Postgres (revocable sessions, durable limits)
+./start.sh --rebuild  # force a rebuild of every image
+./start.sh status     # what is running and whether it is healthy
+./start.sh logs       # tail every service
+./start.sh check      # preflight only, changes nothing
+./start.sh down       # stop and remove the containers
+```
+
+`start.sh` does what `docker compose up` cannot: it detects the Docker socket's
+group and passes it to the sidecar (which is refused the socket without it),
+builds the sandbox image up front, waits for real HTTP responses rather than
+"Up", and verifies the sidecar can actually start a container.
 
 See `ARCHITECTURE.md`, `EXECUTION_PLAN.md`, `docs/DEPLOY.md`. Original brief: `docs/`.
 
@@ -52,11 +98,17 @@ ollama pull qwen2.5-coder:3b                    # developer/tester/reviewer/pm
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate   # `python` alone is not on PATH
-pip install -r backend/requirements.txt
+pip install -r backend/requirements-dev.txt       # dev file: adds pytest/ruff/bandit
 pytest -q                                       # offline suite, no model needed
 python cli.py --run "a library API that lends books" --out outputs/demo --live
 python cli.py --eval
 ```
+
+`backend/requirements.txt` is the runtime set the backend image installs;
+`requirements-dev.txt` is that plus pytest/ruff/bandit for the suite and for
+`SANDBOX_MODE=subprocess`. In the default container mode the generated code's
+pytest/ruff/bandit live in the sandbox image instead, so the backend image
+carries none of them.
 
 `./run_all.sh` runs every gate in order and prints a pass/fail table. Pass
 `--llm` to include the generation gates, which use whichever provider
@@ -130,6 +182,63 @@ single module, while a larger one gets `models.py`, `schemas_pyd.py` and routers
 The entrypoint is **discovered from the code** by AST inspection
 (`agents/introspect.py`) rather than assumed to be `main.py`, so `app.py`,
 `server.py` and nested packages all work.
+
+## Full-stack runs and the playground
+
+Tick **Generate a web UI** (or pass `--ui`) to add three nodes after the
+backend tests are green:
+
+```
+ui_designer -> ui_developer -> ui_gate
+```
+
+They emit a **static, no-build** UI — `index.html`, `app.js`, `styles.css` —
+bound to the endpoints the generated API actually declares. There is no React,
+no npm and no bundler in the loop.
+
+Two things are checked rather than merely requested:
+
+* **Relative URLs.** The UI is served at `/preview/<run_id>/`, so
+  `fetch('/books')` would hit the *platform's* API instead of the sandboxed one.
+* **No external origins.** The preview sandbox has no network, so a CDN link
+  renders a half-styled page.
+
+The gate's verdict is **advisory**: a broken UI is reported on the UI tab and
+folded into the review as `minor` findings, but it never changes the run's
+terminal status. A green, tested, reviewed backend run stays green.
+
+Then the **Playground** tab boots the generated app in a **hardened sandbox
+container** on the internal `sandbox-net` network and reverse-proxies it at
+`/preview/<run_id>/`:
+
+```
+GET  /api/runs/{rid}/playground         -> {state, url, host, mode, error, log_tail}
+POST /api/runs/{rid}/playground/start   -> 202, idempotent
+POST /api/runs/{rid}/playground/stop
+ANY  /preview/{rid}/{path:path}         -> reverse proxy to container IP
+```
+
+* **Container isolation**: the preview runs on `sandbox-net` (`internal: true`),
+  with `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`,
+  `--pids-limit 256`, `--memory 512m`, `--cpus 1`, `--user 10001`, and a
+  dedicated `/data` tmpfs for writable state. The generated code cannot reach
+  the internet and has no host filesystem access.
+* **No shared Docker socket**: the backend never sees `docker.sock`. A dedicated
+  **sandbox sidecar** owns the socket and exposes a minimal 2-endpoint API
+  (`POST /sandbox/runs`, `DELETE /sandbox/runs/{id}`) with image allowlist,
+  mount-root confinement, and credential stripping.
+* **Database-backed sessions**: PostgreSQL stores revocable sessions, durable
+  login attempt counts, run events, and file indexes. Logout actually revokes;
+  a fresh limiter blocks after 3 failures.
+* Health probe: exponential backoff from 250 ms polls the spec's declared paths
+  for HTTP 200 within `PREVIEW_BOOT_TIMEOUT_SECONDS` → `running`, else
+  `crashed` with log tail. `ever_booted` is sticky across stops/restarts.
+* TTL reap (default 1800s idle) and concurrency cap (`SANDBOX_MAX_CONCURRENT=4`)
+  bound resource use. Crash-restart recovers on the next proxy request.
+
+> The playground **is isolation** — a hardened container on an internal network
+> with no egress, no host filesystem access, and a dedicated sidecar mediating
+> Docker. This replaces the previous subprocess model.
 
 ## Choosing a backend
 
@@ -221,6 +330,35 @@ risks, edge cases, open questions), an **Ablate reasoner** checkbox on the form
 alongside the other ablations, and a labelled step in the pipeline timeline
 showing its risk and edge-case counts.
 
+## Token ceilings (Phase 1 fix)
+
+The old design hardcoded `GEMINI_MAX_OUTPUT_TOKENS=8192` (and the same flat
+number for Groq/OpenRouter/HF/OpenAI), which routed **every** reasoning call
+through a 16,384-token ceiling — including the one-word `triage` verdict and
+two-sentence `reflection`. This was silently expensive.
+
+Now:
+
+* Per-role ceilings from `_NUM_PREDICT` (`triage=500`, `reflection=800`,
+  `designer=4000`, `developer=4000`, `tester=4000`, `pm=2000`, `reviewer=2000`,
+  `reasoner=2000`).
+* **Hosted floor** `_HOSTED_FLOOR = {designer: 8000, developer: 8000, tester: 8000}`
+  raises only the three genuinely long-output roles on hosted paths.
+* Overrides, most specific first: `LLM_MAX_TOKENS_<ROLE>`, `LLM_MAX_TOKENS`,
+  then provider-specific (`GEMINI_MAX_OUTPUT_TOKENS`, `GROQ_MAX_TOKENS`, etc.).
+* Truncation is **loud and counted**: `finishReason=MAX_TOKENS` (Gemini),
+  `finish_reason=length` (OpenAI-compatible), `done_reason=length` (Ollama)
+  are recorded as failures naming the role and ceiling, and counted as
+  `truncations` in the perf harness.
+
+```bash
+# Example: widen only the Developer if its multi-file answers are truncated
+LLM_MAX_TOKENS_DEVELOPER=12000
+
+# Or shrink reasoning spend for a specific role
+LLM_REASONING_BUDGET_DEVELOPER=1000
+```
+
 ## Results
 
 Two unrelated domains, both generated from a plain-English prompt with no
@@ -286,9 +424,15 @@ run_all.sh   run every phase gate in order
 * The coverage gate is lexical. It proves the domain vocabulary is present, not
   that the behaviour is correct — the tests and reviewer cover that.
 * SWE-bench Lite is a stretch goal, not yet run.
+* The UI is plain static HTML/JS/CSS by decision — no React, Vite or npm build
+  in v1, and no user-triggered code editing from the browser.
+* WebSockets are not proxied to a preview (501 by design).
 * One shared operator account, not per-user accounts.
-* Sessions are stateless, so logout clears the cookie but a copied cookie stays
-  valid until it expires.
-* Production runs the sandbox as a local subprocess, so generated code executes
-  with the API's network access and no isolation. Auth is not a substitute for
-  sandboxing.
+* Production runs the sandbox as a **hardened container on an internal network**,
+  not a subprocess. The sandbox sidecar owns `docker.sock` and enforces image
+  allowlist, mount confinement, and credential stripping.
+* **Database-backed sessions** (PostgreSQL optional; degrades to in-memory when
+  `DATABASE_URL` is unset). Logout revokes; rate limits persist across restarts.
+* **Per-run schemas** in Postgres: each run's tables live in `run_<sha256>` with
+  `search_path` pinned in the connection URL, so generated code never sees
+  another run's data.

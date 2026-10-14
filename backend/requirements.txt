@@ -1,15 +1,29 @@
+# Runtime dependencies for the backend image. Keep this list minimal: it is the
+# production surface, and every entry here is ~1MB of image.
+#
+# Tooling that only the *sandbox* executes (pytest, ruff, bandit) lives in
+# requirements-dev.txt for local development and is baked into the sandbox
+# image instead. See SANDBOX_AND_SCALE_PLAN.md §5.2.
 fastapi>=0.110
 uvicorn>=0.29
 sqlalchemy>=2.0
 pydantic>=2.6
-pytest>=8.0
+# Imported directly by app/config.py. It used to arrive only transitively via
+# openapi-spec-validator, which meant pruning that dependency would have broken
+# settings loading at import time.
+pydantic-settings>=2.2
 httpx>=0.27
 pyyaml>=6.0
-ruff>=0.4
-bandit>=1.7
+# Platform-side, not sandbox-side: agents/designer.py validates the generated
+# OpenAPI document before anything is written to disk, so this one cannot move
+# to the sandbox image with pytest/ruff/bandit.
 openapi-spec-validator>=0.7
 python-dotenv>=1.0
 # Signed session cookies for auth. Password hashing uses stdlib hashlib.scrypt.
 itsdangerous>=2.2
-# langgraph is optional — workflow falls back to sequential orchestrator
-langgraph>=0.1; python_version >= "3.11"
+# PostgreSQL driver for the runs/sessions store (SANDBOX_AND_SCALE_PLAN.md §8).
+# The binary build needs no compiler in the runtime stage.
+psycopg[binary]>=3.2
+# langgraph was declared here and imported nowhere: graph/workflow.py is a plain
+# sequential function and ARCHITECTURE.md says so. Its transitive closure was
+# 47MB -- ~34% of installed Python and ~10% of the image -- for nothing.

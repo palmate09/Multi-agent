@@ -5,10 +5,32 @@ built SPA run as containers; the UI is reachable over the VM's external IP.
 
 ```
 browser ──HTTP(S)──> Caddy ──> nginx (SPA + /api proxy) ──> FastAPI (uvicorn)
-                                                              │
-                                                              ├──> Ollama (host or sidecar)
-                                                              └──> pytest sandbox (local subprocess)
+                          (edge net)                        │
+                                                             ├──> Ollama (optional profile, inner net)
+                                                             ├──> Postgres (inner net, SCRAM)
+                                                             └──> sandbox sidecar (owns docker.sock)
+                                                                    │  edge + inner + sandbox-net
+                                                                    └─> pytest + preview containers
+                                                                       (sandbox-net, internal: true)
 ```
+
+The backend is **not** on `sandbox-net`. That is deliberate: it keeps the
+platform's own API out of reach of the model-generated code the sandbox exists
+to contain. The sidecar is on both networks, so it is the only component that
+can reach the containers, and preview traffic is relayed through it
+(`/sandbox/proxy/<container>/…`) instead of being dialled directly.
+
+Two networks, and the distinction is the security boundary:
+
+| Network | `internal` | Who is on it |
+|---|---|---|
+| `edge` | no | caddy, frontend, backend — needs egress for LLM APIs |
+| `inner` | **yes** | backend, postgres, sandbox, ollama — **no route off the host** |
+| `sandbox-net` | **yes** | sandbox containers only — no route, ever |
+
+`docker.sock` is mounted into **exactly one** service, `sandbox`. The backend
+never sees it, so a vulnerability in the backend cannot be escalated into
+"control the Docker daemon on the VM".
 
 ## 0. What you need first
 
@@ -120,8 +142,9 @@ curl -s localhost/health | jq
 ```
 
 The compose file **requires** `AUTH_SECRET` and `AUTH_PASSWORD_HASH`; it refuses
-to start without them (see section 4a). Expect three services: `caddy`,
-`frontend`, `backend` (healthy). Then browse `http://$IP` and sign in.
+to start without them (see section 4a). Expect five services: `caddy`,
+`frontend`, `backend` (healthy), `postgres` (healthy) and `sandbox` (healthy).
+Then browse `http://$IP` and sign in.
 
 ## 4a. Authentication
 
@@ -178,14 +201,26 @@ Never commit `.env`; it is gitignored. If you rotate `AUTH_PASSWORD_HASH` or
 
 - Passwords: `hashlib.scrypt` (stdlib, memory-hard) with a per-password random
   salt, verified with `hmac.compare_digest`.
-- Sessions: stateless signed cookies (`itsdangerous`), `HttpOnly` +
-  `SameSite=strict`, 12-hour expiry. There is no server-side session store, so
-  **logout only clears the browser's cookie** — a stolen cookie remains valid
-  until it expires. Rotating `AUTH_SECRET` revokes all of them at once.
+- Sessions: **server-side and revocable.** The cookie carries only an opaque
+  256-bit random token; the row it maps to lives in Postgres (`sessions` table)
+  and the token is stored **SHA-256 hashed**, so a database dump is not a set of
+  live credentials. Logging out deletes the row — the session is dead
+  immediately, for every device, including copies of the cookie.
+  - Hashing is a plain SHA-256 rather than scrypt *by design*: these are
+    random 256-bit values, not user-chosen passwords, so there is nothing to
+    brute-force and no slow KDF is warranted.
+  - With no `DATABASE_URL` the app falls back to an in-memory store. Same API,
+    same revocation semantics, but sessions do not survive a restart — fine for
+    local development, not for a deployment.
 - CSRF: double-submit token. The SPA reads the non-`HttpOnly` `mat_csrf` cookie
   and echoes it in `X-CSRF-Token` on every write. Enforced centrally in
   middleware, so a route added later is covered automatically.
 - Login throttling: 5 failures per client IP in 5 minutes → 15-minute block.
+  Counted in the `login_attempts` table, so the budget **survives a backend
+  restart**. With the old in-memory counter, restarting the container handed an
+  attacker a fresh budget — which is exactly when an attacker would restart it.
+  A database outage degrades to the in-memory limiter rather than to *no*
+  limiting.
 
 ### Headless access
 
@@ -219,6 +254,67 @@ store the session.
 
 Do not leave a public deployment on plain HTTP. Restrict the firewall to your
 IP (section 8) until TLS is in place.
+
+## 4c. Sandbox troubleshooting
+
+The sandbox has three ways to be silently broken, all of which look like a
+generated app that does not work:
+
+| Symptom | Cause | Check |
+|---|---|---|
+| Sidecar healthy but `"engine": false` | no Docker CLI in the image, or no permission on the socket | `$C logs sandbox`; `docker compose exec sandbox docker info` |
+| `"engine": true` but every run fails to start a container | `DOCKER_GID` unset, so uid 10001 cannot open the socket | `stat -c %g /var/run/docker.sock`, then set `DOCKER_GID` to match |
+| Sandbox runs report `no tests ran` | the bundle was mounted by host path, which the daemon resolved to an empty host directory | the sidecar must be mounting the runs **volume by name**; check `SANDBOX_MOUNT_VOLUME` discovery in `sandbox.sidecar._mount_volume()` |
+| `mount must be inside /data/runs` | the bundle was created outside the sidecar's mount root | the bundle must live under `RUNS_DIR`; `_bundle_dir()` places it there when a sidecar is configured |
+| Preview is 502 | the backend cannot reach a container IP — it is not on `sandbox-net` | this is expected; traffic must be relayed via `/sandbox/proxy/<id>/…` |
+
+`./start.sh up` performs the first two checks automatically and reports them
+rather than leaving a half-working stack.
+
+## 4b. Postgres
+
+The backend stores sessions, API keys, login attempts, the run index and run
+events in Postgres. It is **optional**: leave `DATABASE_URL` unset and
+everything degrades to the previous in-memory/filesystem behaviour, which is
+what local development and `cli.py` use. Set it in production, because the
+in-memory fallback is per-process and the rate limiter resets on restart.
+
+```bash
+printf 'DATABASE_URL=postgresql+psycopg://mat:CHANGE_ME@postgres:5432/mat\n' >> .env
+docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d
+```
+
+The `postgres` service uses SCRAM authentication and is on the **internal**
+`inner` network, so it has no route off the VM and is unreachable from the
+internet regardless of how the host firewall is configured. It is not
+published to any host port.
+
+Two things live in Postgres beyond the obvious rows:
+
+* **Per-run schemas.** Each generated run gets its own schema, `run_<sha256 of
+  the run id>`, with `search_path` pinned in the connection URL
+  (`?options=-csearch_path%3Drun_abc`). A run's generated app therefore cannot
+  read another run's tables even though they share one database and one
+  connection pool. The mapping is a digest rather than a sanitised run id
+  because `a-b`, `a.b` and `a_b` all sanitise to the same characters — a
+  sanitising mapping alone would silently merge three runs into one schema.
+* **Run events.** `Run.emit` mirrors progress events to `run_events` as they
+  happen, so the timeline survives a backend restart rather than living only in
+  memory.
+
+The filesystem remains the artifact store: `runs-data` holds the generated code,
+tests, UI and reports. The database is an *index*, not a replacement, so
+re-indexing from disk is always possible and `RunIndex.reconcile()` does
+exactly that on startup.
+
+### Verify it is actually wired
+
+```bash
+$C exec postgres psql -U mat -d mat -c '\dt'              # tables exist
+$C exec backend env | grep DATABASE_URL                    # DSN present
+curl -s -b /tmp/j localhost/api/auth/sessions | jq         # your live sessions
+# Log out, then replay the old cookie: it must now be 401, not 200.
+```
 
 ## 5. Automated deploys
 
@@ -310,8 +406,9 @@ printf 'LLM_PROVIDER=local\nOLLAMA_URL=http://ollama:11434\nSKIP_OLLAMA=0\n' >> 
 docker compose --env-file .env -f deploy/docker-compose.prod.yml --profile ollama up -d
 ```
 
-The sidecar is on the internal `edge` network and publishes no ports. To use
-host Ollama instead, keep the systemd service and point `OLLAMA_URL` at
+The sidecar is on the internal `inner` network and publishes no ports, so it is
+unreachable from the internet and has no route off the host. To use host
+Ollama instead, keep the systemd service and point `OLLAMA_URL` at
 `http://host.docker.internal:11434` (the compose file already maps that host
 name).
 
@@ -345,10 +442,21 @@ Three operational caveats, all hit during development:
   each id in about two seconds and prints which ones answer. Note the
   distinction: **404 means the id is retired**, **429 means the quota is
   exhausted and resets daily**.
-* **`GEMINI_MAX_OUTPUT_TOKENS` must be generous** (default 8192). The flash
-  models spend output tokens on reasoning before answering; a small cap returns
-  empty content with `finishReason=MAX_TOKENS`, which is indistinguishable from
-  a broken model.
+* **Token ceilings are per-role, and one flat global defeats that.** Every
+  backend takes its completion ceiling from the `_NUM_PREDICT` table in
+  `agents/llm.py` (`triage` 500, `reflection` 800, `developer` 8000) and
+  doubles it for a role that reasons, because the flash models spend output
+  tokens thinking before answering. Setting `GEMINI_MAX_OUTPUT_TOKENS` — as
+  every deployment file used to default it to 8192 — overrides the table with
+  one flat number, which is the defect Phase 1 removed: it asked for 16,384
+  tokens to emit a one-word triage verdict, on every failed fix-loop
+  iteration. Leave it unset.
+* **A ceiling that is too small is now loud, not silent.** `finishReason=MAX_TOKENS`
+  (Gemini) and `finish_reason=length` (Groq, OpenRouter) are recorded as a
+  failure naming the role and the ceiling, and counted as `truncations` in
+  `backend/evals/perf.json`. Widen the offending role with
+  `LLM_MAX_TOKENS_<ROLE>`, or shrink reasoning spend with
+  `LLM_REASONING_BUDGET_<ROLE>`; do not widen everything.
 
 **The free tier rate-limits hard.** Once the quota is gone every id returns 429
 and the run ends `blocked` — it does not degrade to a fake green result.
@@ -388,9 +496,18 @@ C="docker compose --env-file .env -f deploy/docker-compose.prod.yml"
 
 $C ps                      # health of each service
 $C logs -f backend         # API logs
+$C logs -f sandbox         # container spawn/decisions and image builds
 $C logs -f caddy           # access logs
 $C top                     # live resource use
 docker stats --no-stream   # one-shot snapshot
+```
+
+Leftover containers are worth watching for: a container that outlives its run
+means a stop or reap did not land. The reaper reconciles on each tick, so a
+one-off is normal after a deploy; a growing count is not.
+
+```bash
+docker ps -a --filter 'ancestor=agent-team-sandbox' --format '{{.ID}} {{.Status}} {{.Command}}'
 ```
 
 Run artifacts live in the `runs-data` volume, not on the host filesystem:
@@ -406,6 +523,20 @@ Back them up by copying the volume:
 docker run --rm -v multi-agent-team_runs-data:/src -v "$PWD:/dst" \
   alpine tar czf /dst/runs-backup.tar.gz -C /src .
 ```
+
+The database is a separate backup, and a smaller one. It holds the run index,
+events, sessions and rate-limit counters; the artifacts themselves are on disk.
+Use a logical dump so the schema and per-run schemas come out:
+
+```bash
+$C exec -T postgres pg_dump -U mat -d mat | gzip > "db-$(date +%F).sql.gz"
+```
+
+Restoring the volume alone is enough to recover the code; restoring the dump is
+what brings back the timeline, the sessions and the login-attempt history. If
+you restore artifacts without the dump, `RunIndex.reconcile()` re-derives most
+of the index from disk on the next backend start — sessions and rate-limit
+counters are the only things that cannot be reconstructed.
 
 ### Restricting access
 
@@ -423,41 +554,45 @@ Keep 22 open to your IP or you will lock yourself out.
 ## 9. Known limitations
 
 **Authentication is a single shared password, not per-user accounts.** One
-operator account plus an API key. Fine for a personal tool; if several people
-need access, add real user records and per-run ownership first.
+operator account plus an API key. The `users` table and per-run ownership
+columns exist and are populated, but there is no signup flow and no per-run
+authorisation check — any authenticated session sees every run. Fine for a
+personal tool; add a per-run ownership filter before inviting anyone else.
 
-**Sessions are stateless.** Logout clears the local cookie; a copied cookie
-stays valid for up to `AUTH_SESSION_HOURS`. Rotate `AUTH_SECRET` to revoke
-everything immediately.
+**Sessions are server-side and revocable**, so a copied cookie dies at logout
+rather than at expiry. That is a real improvement on the previous stateless
+cookie, but it is not multi-factor: the password remains the only credential.
+`DATABASE_URL` must be set for it to be durable — without it the store is
+in-memory and a restart ends every session.
 
-**The sandbox is not isolated in this topology.** `sandbox/runner.py` has a
-Docker path (no network, 512 MB, 1 CPU) and a local-subprocess fallback. Inside
-the backend container Docker is not available, so production runs the fallback:
-pytest executing LLM-generated code as the `appuser` in the backend container,
-with network access. That container can reach the host's Docker socket
-boundaries? No — it has no socket mount, so it cannot escape to the host that
-way. But it *can* make outbound network calls, and generated code runs
-arbitrary Python.
+**The sandbox is isolated, but it is isolation against a bug, not against a
+determined attacker.** Generated code runs in a hardened container on
+`sandbox-net` (`internal: true`, no default route), with `--read-only`,
+`--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit 256`,
+`--memory 512m`, `--cpus 1` and a non-root uid. That closes the defects this
+plan set out to close: the code cannot reach the internet, cannot see the
+platform's filesystem, and cannot write the files that are about to grade it.
 
-Mitigations that matter, in order of value:
+What it does **not** close, and what a determined attacker would try:
 
-1. Do not expose the deployment publicly (step 8).
-2. Move sandbox execution to a sibling container with its own network
-   namespace. This is the real fix and the main reason to move off a single VM.
-3. Until then, run the backend with egress restricted to the Ollama host, so
-   generated code cannot reach the internet.
+* The container still runs arbitrary Python inside its own namespace. A kernel
+  or runtime escape would land on the Docker host, which is the VM itself. The
+  mitigation is that only the sidecar holds `docker.sock`, so such a container
+  has no daemon to talk to unless it also escapes the sidecar.
+* The sidecar is the single trusted component. It re-validates every request
+  (image allowlist, mount-root confinement, `extra="forbid"`, credential
+  stripping), so a backend bug that produced a bad argv still cannot ask for an
+  arbitrary mount or a privileged container — but it is the thing to review
+  first if this deployment ever grows past a trusted operator.
+* Resource limits are per-container, not per-VM. `SANDBOX_MAX_CONCURRENT=4`
+  bounds how many run at once; a single container can still use its full 512 MB
+  and 1 CPU. On a 4 GB VM, lower `SANDBOX_MAX_CONCURRENT` rather than raising
+  the per-container limits.
 
-The backend container has no Docker socket mount, so it cannot use the daemon to
-escape. But it does have outbound network access, and generated code runs
-arbitrary Python inside it.
-
-**The generated-code sandbox still runs with the API's privileges.** Auth means
-only an authenticated operator can start a run; it does not sandbox the code that
-run executes. See above.
-
-**In-memory run registry.** Run metadata lives in the process; only the artifact
-directories survive a restart (`rehydrate()` picks them up). Fine for a single
-user, wrong for more than one.
+**In-memory run registry when `DATABASE_URL` is unset.** Run metadata lives in
+the process and only the artifact directories survive a restart
+(`rehydrate()` picks them up). Set `DATABASE_URL` and the registry, the event
+log and the file index are durable and queryable.
 
 **CPU-only LLM.** See section 7. This is the practical reason
 `LLM_PROVIDER=gemini` is the default: a local model cannot generate a full app
@@ -475,7 +610,17 @@ paper over it.
 | Runs end `blocked` | no backend reachable | `curl -s localhost/api/llm \| jq`; the error is in `run.error` and the log |
 | Runs end `blocked`, `429` in log | Gemini free quota exhausted | wait for the daily reset, or use `LLM_PROVIDER=local` |
 | Runs end `blocked`, `404` in log | retired Gemini model id | `python backend/evals/check_gemini.py`, then update `GEMINI_MODELS` |
-| Generation looks truncated | token ceiling too low | raise `OLLAMA_NUM_PREDICT` / `GEMINI_MAX_OUTPUT_TOKENS` |
+| Generation looks truncated | token ceiling too low | raise `OLLAMA_NUM_PREDICT`, or `LLM_MAX_TOKENS_<ROLE>` for the named role — the log entry says which |
 | Local generation times out | CPU inference slower than the budget | raise `OLLAMA_TIMEOUT`, use the 3b model, or switch to Gemini |
 | `permission denied` on Docker | user not in the `docker` group | `sudo usermod -aG docker $USER` then re-login |
 | Caddy will not start after editing | invalid config | `docker compose ... run --rm caddy caddy validate --config /etc/caddy/Caddyfile` |
+| Preview stays `crashed` | container could not boot the generated app | `$C logs sandbox`; the generated code's own traceback in the container log is the usual cause |
+| Preview is `502` and never recovers | container on the wrong network, or `sandbox-net` recreated without `internal: true` | `docker inspect <cid> --format '{{json .NetworkSettings.Networks}}'`; `docker network inspect sandbox-net --format '{{.Internal}}'` must print `true` |
+| `sandbox` service is unhealthy | image allowlist rejected the image, or the mount root is not visible to the sidecar | `$C logs sandbox`; the allowlist is a compose env var and the mount root must be a real path |
+| `PermissionError: '/data/w'` in a run, `unresolved` with an empty failure list | the `/data` tmpfs came up 0755 instead of 1777, so uid 10001 could not stage the suite | the data tmpfs pins `mode=1777` in `run_argv`; check the container is built from the current `backend/sandbox/flags.py` |
+| Every run dies with `No module named pytest` | `use_docker` resolved False, so pytest ran as a subprocess in the backend (whose runtime image has no pytest) | `SANDBOX_MODE=container` must reach the run; the pipeline now defers to `Runner.uses_docker()` |
+| Tests fail with `sqlite3.OperationalError: unable to open database file` | the generated test wrote a SQLite file next to itself, into the read-only mount | the suite now runs on a disposable copy under `/data`; the host copy stays read-only |
+| Sandbox image rebuilds every cycle | Dockerfile or wheelhouse changed | expected — the tag is `agent-team-sandbox:local-<hash>`; confirm with `docker images agent-team-sandbox` |
+| Run events lost after a restart | `DATABASE_URL` unset, so the run index is in-memory | set `DATABASE_URL`; `RunIndex.reconcile()` re-indexes from the runs volume on startup |
+| Logout did not end the session | `DATABASE_URL` unset, so sessions are in-memory per-process | set `DATABASE_URL`; verify with `curl -b /tmp/j localhost/api/auth/sessions` |
+| `429` on login right after a restart | limiter fell back to memory because the database is unreachable | `$C logs backend` for the database error; `$C exec postgres pg_isready` |

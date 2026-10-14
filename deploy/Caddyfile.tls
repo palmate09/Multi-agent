@@ -26,13 +26,6 @@
 
 	encode zstd gzip
 
-	header {
-		X-Content-Type-Options "nosniff"
-		X-Frame-Options "DENY"
-		Referrer-Policy "no-referrer"
-		-Server
-	}
-
 	log {
 		output stdout
 		format console
@@ -40,5 +33,25 @@
 
 	reverse_proxy frontend:8080 {
 		flush_interval -1
+	}
+
+	# Two mutually exclusive header blocks rather than a site-wide one plus an
+	# override for /preview — see the note in the plain-HTTP Caddyfile. A
+	# site-wide DENY followed by a preview SAMEORIGIN does not work: Caddy runs
+	# `header` before `reverse_proxy` and the override loses.
+	@preview path /preview/*
+	header @preview {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	@site not path /preview/*
+	header @site {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
 	}
 }

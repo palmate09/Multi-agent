@@ -12,6 +12,14 @@ COPY tsconfig.json vite.config.ts index.html ./
 COPY src ./src
 RUN npm run build
 
+# Pre-compress the built assets so nginx serves them with `gzip_static` and
+# does no per-request compression. Only text-ish types, matching the
+# gzip_types list in nginx/default.conf -- gzipping a .woff or a .png is wasted
+# build time and an extra 90% of nothing.
+RUN find dist -type f \( \
+        -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.json' -o -name '*.svg' \
+    \) -exec gzip -9 -k -f {} \;
+
 # ---- runtime stage -----------------------------------------------------
 # nginx-unprivileged listens on 8080 and runs as uid 101, so no root, no
 # capability juggling, and it works with a read-only root filesystem.

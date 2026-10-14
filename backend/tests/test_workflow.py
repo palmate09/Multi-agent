@@ -74,7 +74,13 @@ LIBRARY = (
 def test_stub_lists_every_node():
     out = run_stub("outputs/stub_test")
     assert out["ok"] is True
-    assert len(out["nodes"]) == 9
+    # The full skeleton: 9 pipeline nodes, plus the domain-coverage gate and the
+    # three UI nodes (ui_designer, ui_developer, ui_gate) added for full-stack
+    # runs. The UI nodes are declared unconditionally; ``want_ui`` decides
+    # whether a given run actually walks them.
+    assert len(out["nodes"]) == 13
+    for node in ("ui_designer", "ui_developer", "ui_gate"):
+        assert node in out["nodes"]
 
 
 def test_all_agent_failures_block_the_run(no_llm, tmp_path):

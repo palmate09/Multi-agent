@@ -1,4 +1,5 @@
-"""CLI: --stub, --run, --eval, --live, ablations (--no-tester/--no-reviewer/--no-reasoner)."""
+"""CLI: --stub, --run, --eval, --live, ablations (--no-tester/--no-reviewer/--no-reasoner), --ui."""
+
 from __future__ import annotations
 
 import argparse
@@ -12,6 +13,7 @@ sys.path.insert(0, str(BACKEND))
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stub", action="store_true")
@@ -22,23 +24,34 @@ def main():
     ap.add_argument("--no-tester", action="store_true")
     ap.add_argument("--no-reviewer", action="store_true")
     ap.add_argument("--no-reasoner", action="store_true")
+    ap.add_argument("--ui", action="store_true", help="also generate a static web UI")
     ap.add_argument("--docker", action="store_true")
     args = ap.parse_args()
 
     if args.stub:
         from graph.workflow import run_stub
+
         print(json.dumps(run_stub(), indent=2))
         return
     if args.eval:
         from evals.metrics import summarize_run
         from graph.workflow import run_team
+
         suite = json.loads((BACKEND / "evals" / "requirements_suite.json").read_text())
         rows = []
         for item in suite:
             d = f"outputs/eval_{item['id']}"
-            run_team(item["requirement"], out_dir=d, verbose=args.live,
-                     skip_tester=args.no_tester, skip_reviewer=args.no_reviewer,
-                     skip_reasoner=args.no_reasoner)
+            run_team(
+                item["requirement"],
+                out_dir=d,
+                verbose=args.live,
+                skip_tester=args.no_tester,
+                skip_reviewer=args.no_reviewer,
+                skip_reasoner=args.no_reasoner,
+                # Per-entry opt-in, so adding a UI requirement never
+                # changes what the existing API entries measure.
+                want_ui=bool(item.get("ui")),
+            )
             rows.append(summarize_run(d))
         Path("outputs").mkdir(exist_ok=True)
         (BACKEND / "evals" / "results.json").write_text(json.dumps(rows, indent=2))
@@ -46,11 +59,24 @@ def main():
         return
     req = args.run or "Build a REST API for managing tasks with SQLite persistence."
     from graph.workflow import run_team
-    st = run_team(req, out_dir=args.out, verbose=True,
-                  skip_tester=args.no_tester, skip_reviewer=args.no_reviewer,
-                  skip_reasoner=args.no_reasoner,
-                  use_docker=args.docker)
-    print(f"status={st.status} dev_retries={st.retry_dev} tests={st.report.passed if st.report else 0} pass")
+
+    st = run_team(
+        req,
+        out_dir=args.out,
+        verbose=True,
+        skip_tester=args.no_tester,
+        skip_reviewer=args.no_reviewer,
+        skip_reasoner=args.no_reasoner,
+        want_ui=args.ui,
+        use_docker=args.docker,
+    )
+    print(
+        f"status={st.status} dev_retries={st.retry_dev} tests={st.report.passed if st.report else 0} pass"
+    )
+    if st.ui_report:
+        failed = [c.name for c in st.ui_report.failures]
+        print(f"ui={'ok' if st.ui_report.ok else 'issues: ' + ', '.join(failed)}")
+
 
 if __name__ == "__main__":
     main()

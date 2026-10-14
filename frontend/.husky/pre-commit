@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# Fast gate only: lint, types and unit tests. Playwright is left to CI because
+# it boots a real backend, and a pre-commit hook that takes a minute is a
+# pre-commit hook people learn to bypass with --no-verify.
+npm run lint
+npm run typecheck
+npm run test

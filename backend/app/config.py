@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -10,7 +11,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # `env_file` is overridable so the test suite can point it at nothing.
+    # pydantic-settings reads this path directly, bypassing `os.environ`, so a
+    # `monkeypatch.delenv` cannot stop it -- which means a developer with
+    # PREVIEW_ALLOW_START=1 in their .env silently changes what a test asserting
+    # the *default* measures. The suite failed here for exactly that reason.
+    model_config = SettingsConfigDict(
+        env_file=os.getenv("MAT_ENV_FILE", ".env"), env_file_encoding="utf-8", extra="ignore"
+    )
 
     app_name: str = "Multi-Agent Software Team"
     version: str = "1.0.0"
@@ -32,6 +40,23 @@ class Settings(BaseSettings):
     sandbox_use_docker: bool = False
     sandbox_timeout_seconds: int = 60
 
+    # ---- playground ----
+    # A preview is a real subprocess running generated code on this host. It
+    # is NOT isolation: the caps below bound how long and how many, not what the
+    # code can reach. Only the process's own credentials are stripped.
+    preview_ttl_seconds: int = 1800
+    preview_max_concurrent: int = 3
+    # How long a preview may take to answer its first request before it is
+    # declared crashed. Generated apps do a create_all at import, so this is
+    # generous on purpose.
+    preview_boot_timeout_seconds: int = 30
+    # How often the TTL reaper scans for idle or dead previews.
+    preview_reap_interval: int = 15
+    # Whether the API may start a preview at all. On by default outside
+    # production so a developer can just click it; production has to opt in,
+    # because there it means executing generated code on the server.
+    preview_allow_start: bool | None = None
+
     # Hosted UI location, used for CORS in split dev setups.
     frontend_origin: str = "http://localhost:5173"
 
@@ -48,6 +73,18 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment.lower() in {"production", "prod"}
+
+    @property
+    def previews_enabled(self) -> bool:
+        """Whether starting a preview is permitted.
+
+        Default on in development, off in production: there, ``/preview/*``
+        means running generated code on the server, which has to be a decision
+        somebody made rather than a side effect of clicking a button.
+        """
+        if self.preview_allow_start is None:
+            return not self.is_production
+        return self.preview_allow_start
 
 
 @lru_cache

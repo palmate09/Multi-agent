@@ -78,6 +78,28 @@ Steps:
 
 Gate: `results.json` + README table exist.
 
+## Phase 6 — Full-stack generation and the playground
+
+Steps:
+1. `ApiSpec.has_ui` + `UiSpec`/`UiReport`/`UiCheck` in `schemas/messages.py`;
+   `ui` on `RunCreate`, **default off** so acceptance numbers are untouched.
+2. `agents/ui.py`: `design_ui` (contract validated against the generated
+   spec's paths), `build_ui` (static files, relative URLs, parse guard),
+   `gate` (7 static checks, no LLM, advisory verdict).
+3. Three workflow nodes after `tests_green`; artifacts `ui_contract.json`,
+   `ui/`, `ui_report.json`; `reconstruct_state` reads all three back.
+4. `app/services/playground.py`: subprocess session, ephemeral loopback port,
+   env hardening, health probe, TTL reaper + concurrency cap.
+5. `app/routers/playground.py`: 3 control endpoints + the `/preview/{rid}/…`
+   reverse proxy; `/preview` stays auth-required and CSRF-exempt.
+6. nginx `location /preview/`, Caddy `@preview` matcher, Vite proxy.
+7. SPA: Playground + UI tabs, the "Generate a web UI" checkbox, timeline nodes.
+8. `evals/metrics.py` gains `ui_pass_rate` and `preview_booted`; two
+   full-stack requirements in the suite.
+
+Gate: `pytest -q` green, one `cli.py --run … --ui` produces `ui/`, and
+`curl -i localhost/preview/<rid>/` returns the app's HTML.
+
 ## Verification commands (run after each phase)
 
 ```
@@ -88,6 +110,7 @@ python cli.py --run "task manager" --out outputs/demo
 python evals/baseline.py
 python -m tests.test_reviewer  # phase 4
 python cli.py --eval            # phase 5
+python cli.py --run "a recipe collection REST API" --ui   # phase 6
 ```
 
 ## Risks → fallbacks
@@ -99,7 +122,10 @@ python cli.py --eval            # phase 5
 | Unsafe code | Docker no-net +Limits; local tmp fallback |
 | Cost | Token log + small/local for easy roles + free tiers |
 | Lucky run | Repeat 3×, report spread not best |
-| Scope creep | REST-only; UI later |
+| Scope creep | REST-only; no React/npm build in v1 |
+| 3b model emits a broken UI | UI gate reports it; terminal status unaffected; no edge from `ui_gate` to a failure |
+| Generated code runs with platform credentials | Keys stripped from the child env; loopback bind; TTL + concurrency caps; `/preview` auth-required. **Not isolation** — put Docker/a VM in front on a host you care about |
+| Preview leaks between runs | `/preview` never public; run-id → port validated per request |
 
 ## Done definition
 

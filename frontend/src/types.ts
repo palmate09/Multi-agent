@@ -1,17 +1,20 @@
-export type Severity = "blocker" | "major" | "minor";
+export type Severity = 'blocker' | 'major' | 'minor';
 
 export type PipelineNode =
-  | "pipeline"
-  | "pm"
-  | "reasoner"
-  | "designer"
-  | "developer"
-  | "coverage"
-  | "tester"
-  | "runner"
-  | "triage"
-  | "reviewer"
-  | "final";
+  | 'pipeline'
+  | 'pm'
+  | 'reasoner'
+  | 'designer'
+  | 'developer'
+  | 'coverage'
+  | 'tester'
+  | 'runner'
+  | 'triage'
+  | 'ui_designer'
+  | 'ui_developer'
+  | 'ui_gate'
+  | 'reviewer'
+  | 'final';
 
 export interface PipelineEvent {
   seq: number;
@@ -81,6 +84,45 @@ export interface ReviewComment {
   location: string;
 }
 
+/** One static check from the UI gate. Advisory: never gates acceptance. */
+export interface UiCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+/** The UI Designer's contract. */
+export interface UiSpec {
+  pages: string[];
+  components: string[];
+  data_bindings: string[];
+  files: string[];
+}
+
+export interface UiReport {
+  ok: boolean;
+  checks: UiCheck[];
+  probed: string[];
+}
+
+export type PreviewState = 'stopped' | 'starting' | 'running' | 'crashed';
+
+export interface PreviewStatus {
+  run_id: string;
+  state: PreviewState;
+  /** Gateway path for the iframe; null unless the app is actually up. */
+  url: string | null;
+  port: number | null;
+  started_at: number | null;
+  idle_seconds: number;
+  error: string | null;
+  log_tail: string;
+  /** Which transport ran it: 'container' or 'subprocess'. */
+  mode?: string | null;
+  /** A path the generated app actually serves; `/` is often not one of them. */
+  entry_path?: string | null;
+}
+
 export interface RunDetail extends RunSummary {
   events: PipelineEvent[];
   artifacts: string[];
@@ -94,6 +136,12 @@ export interface RunDetail extends RunSummary {
   report: { passed: number; failed: number; raw?: string } | null;
   coverage?: Coverage | null;
   memory: string[];
+  /** UI contract; null unless the run asked for a web UI. */
+  ui?: UiSpec | null;
+  /** Generated index.html / app.js / styles.css. */
+  ui_code?: Record<string, string>;
+  /** Static gate verdict over those files. */
+  ui_report?: UiReport | null;
 }
 
 export interface SessionInfo {
@@ -111,7 +159,7 @@ export interface LlmStatus {
 }
 
 export interface Health {
-  status: "ok" | "degraded";
+  status: 'ok' | 'degraded';
   version: string;
   environment: string;
   llm: LlmStatus;
@@ -127,6 +175,10 @@ export interface EvalResults {
     spec_coverage: number;
     attempts_to_green: number;
     wall_time: number;
+    /** Fraction of the UI gate's static checks that passed; null if no UI. */
+    ui_pass_rate?: number | null;
+    /** Whether the app booted under the playground, when a preview was run. */
+    preview_booted?: boolean | null;
   }>;
   baseline: { passed: number; failed: number; wall_time: number } | null;
   total: number;
@@ -135,49 +187,54 @@ export interface EvalResults {
 }
 
 export const NODE_LABELS: Record<PipelineNode, string> = {
-  pipeline: "Pipeline",
-  pm: "PM",
-  reasoner: "Reasoner",
-  designer: "Designer",
-  developer: "Developer",
-  coverage: "Domain check",
-  tester: "Tester",
-  runner: "Sandbox",
-  triage: "Triage",
-  reviewer: "Reviewer",
-  final: "Final",
+  pipeline: 'Pipeline',
+  pm: 'PM',
+  reasoner: 'Reasoner',
+  designer: 'Designer',
+  developer: 'Developer',
+  coverage: 'Domain check',
+  tester: 'Tester',
+  runner: 'Sandbox',
+  triage: 'Triage',
+  ui_designer: 'UI design',
+  ui_developer: 'UI build',
+  ui_gate: 'UI gate',
+  reviewer: 'Reviewer',
+  final: 'Final',
 };
 
 export const NODE_ORDER: PipelineNode[] = [
-  "pm",
-  "reasoner",
-  "designer",
-  "developer",
-  "coverage",
-  "tester",
-  "runner",
-  "triage",
-  "reviewer",
-  "final",
+  'pm',
+  'reasoner',
+  'designer',
+  'developer',
+  'coverage',
+  'tester',
+  'runner',
+  'triage',
+  'ui_designer',
+  'ui_developer',
+  'ui_gate',
+  'reviewer',
+  'final',
 ];
 
-export function statusTone(status: string): "good" | "warn" | "bad" | "idle" {
-  if (status.startsWith("accepted")) return "good";
+export function statusTone(status: string): 'good' | 'warn' | 'bad' | 'idle' {
+  if (status.startsWith('accepted')) return 'good';
   // blocked = an agent produced nothing; domain_missed = it answered a different
   // question. Both are failures the old design could not report.
   if (
-    status === "failed" ||
-    status === "unresolved" ||
-    status === "unresolved_review" ||
-    status === "blocked" ||
-    status === "domain_missed"
+    status === 'failed' ||
+    status === 'unresolved' ||
+    status === 'unresolved_review' ||
+    status === 'blocked' ||
+    status === 'domain_missed'
   )
-    return "bad";
-  if (status === "running" || status === "queued" || status === "tests_green")
-    return "warn";
+    return 'bad';
+  if (status === 'running' || status === 'queued' || status === 'tests_green') return 'warn';
   // stopping = stop requested, worker draining to cancelled. cancelled = user
   // stopped the run; neutral tone, it is neither success nor failure.
-  if (status === "stopping") return "warn";
-  if (status === "cancelled") return "idle";
-  return "idle";
+  if (status === 'stopping') return 'warn';
+  if (status === 'cancelled') return 'idle';
+  return 'idle';
 }

@@ -1,0 +1,21 @@
+# Development and CI dependencies. NOT installed into the backend image.
+#
+#   python -m venv .venv && .venv/bin/pip install -r backend/requirements-dev.txt
+#
+# ruff and bandit are here for two distinct reasons and both are legitimate:
+#
+#   * linting this repository (CI, pre-commit) -- that is the obvious one
+#   * sandbox/runner.py's `static_analysis`, which shells out to
+#     `python -m ruff check .` and `python -m bandit -q -r .` against the
+#     *generated* code
+#
+# The second is why they cannot simply be deleted from the platform. In
+# SANDBOX_MODE=subprocess they run on this interpreter; in container mode they
+# run inside the sandbox image, which bakes its own copies. The backend image
+# needs neither, because with SANDBOX_MODE=subprocess switched off it never
+# executes generated code at all.
+-r requirements.txt
+
+pytest>=8.0
+ruff>=0.4
+bandit>=1.7

@@ -1,14 +1,19 @@
-"""Authentication: password hashing, signed session cookies, rate limiting.
+"""Authentication: password hashing, server-side sessions, rate limiting.
 
 Design notes:
 
 * Passwords use stdlib ``hashlib.scrypt`` with a per-password random salt.
   No native dependency (bcrypt/argon2) is needed, and scrypt is memory-hard so
   a stolen hash is expensive to attack offline.
-* Sessions are stateless signed cookies (``itsdangerous``) rather than a server
-  side store, so the API stays a single process. Logout therefore cannot
-  revoke an already-issued cookie before it expires; rotate ``AUTH_SECRET`` to
-  invalidate every session at once.
+* Sessions are **server-side rows** keyed by a SHA-256 of an opaque token (see
+  ``app/db/sessions.py``). They used to be stateless signed cookies, which
+  meant a copied cookie stayed valid for its whole lifetime and logout could
+  not revoke it. They stay revocable without a database by falling back to an
+  in-process map, which is a development convenience and not a deployment
+  posture.
+* Login rate limiting reads and writes the ``login_attempts`` table when a
+  database is configured. The in-memory limiter it replaced is a per-process
+  ``defaultdict``: it resets on restart and does nothing across replicas.
 * An optional API key allows headless access (``X-API-Key``) for scripting.
 """
 
@@ -100,6 +105,21 @@ def new_api_key() -> str:
     return "mat_" + secrets.token_urlsafe(32)
 
 
+def new_raw_session_token() -> str:
+    """A fresh opaque session token.
+
+    Opaque, not signed. The signed cookie this replaces could not be revoked --
+    copying it gave an attacker a valid credential for the full 12 hours and
+    logout did nothing about it. The token is now a reference to a row, so
+    deleting the row is the logout.
+
+    256 bits of ``secrets``, which is why it can be stored as a SHA-256 digest
+    with no risk: there is nothing to guess.
+    """
+    return secrets.token_urlsafe(32)
+
+
+
 # --------------------------------------------------------------------------
 # sessions
 # --------------------------------------------------------------------------
@@ -166,6 +186,19 @@ def reset_auth_config() -> None:
 def _serializer() -> URLSafeTimedSerializer:
     cfg = get_auth_config()
     return URLSafeTimedSerializer(cfg.secret, salt="mat-session-v1")
+
+
+def _accepts_legacy_cookies() -> bool:
+    """Whether a cookie issued under the old signed scheme is still honoured.
+
+    ``AUTH_ACCEPT_LEGACY_SESSIONS`` defaults to on for one release so an upgrade
+    does not log out every user mid-request, and is meant to be turned off once
+    the deployment has settled. The cookie name is unchanged, which is what makes
+    a stale cookie fail closed rather than half-work: it is either in the store
+    or it is not.
+    """
+    return os.getenv("AUTH_ACCEPT_LEGACY_SESSIONS", "1") == "1"
+
 
 
 def issue_session(username: str) -> tuple[str, str]:
@@ -259,7 +292,12 @@ def client_identity(request: Request) -> str:
 
 
 def current_user(request: Request) -> str | None:
-    """Return the authenticated username, or None."""
+    """Return the authenticated username, or None.
+
+    The cookie is a reference to a server-side row, not a self-authenticating
+    credential, so a revoked session fails closed the moment its row is gone --
+    with no wait for an expiry and nothing left to steal.
+    """
     cfg = get_auth_config()
     if not cfg.enabled:
         return "anonymous"
@@ -268,10 +306,21 @@ def current_user(request: Request) -> str | None:
     token = request.cookies.get(SESSION_COOKIE)
     if not token:
         return None
-    data = read_session(token)
-    if not data:
-        return None
-    return data.get("u") or None
+    from app.db.sessions import get_sessions
+
+    resolved = get_sessions().resolve(token)
+    if resolved is not None:
+        return resolved[0]
+    # No store, or the session is gone. One last try with the legacy signed
+    # cookie so a deployment upgrading mid-session is not logged out
+    # mid-request; anything issued under the old scheme is rejected after
+    # AUTH_SESSION_FORMAT is confirmed, not silently half-honoured.
+    if _accepts_legacy_cookies():
+        data = read_session(token)
+        if data:
+            return data.get("u") or None
+    return None
+
 
 
 def require_auth(request: Request) -> str:
