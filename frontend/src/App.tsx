@@ -1,49 +1,79 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+/* eslint-disable react-hooks/set-state-in-effect */
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { api, setUnauthorizedHandler, subscribeToRun } from "./api";
-import type { Health, PipelineEvent, RunDetail, RunSummary } from "./types";
-import { statusTone } from "./types";
-import { ConfirmModal } from "./components/ConfirmModal";
-import { EvalPanel } from "./components/EvalPanel";
-import { FileViewer } from "./components/FileViewer";
-import { LoginPage } from "./components/LoginPage";
-import { PipelineTimeline } from "./components/PipelineTimeline";
-import { PlaygroundPanel } from "./components/PlaygroundPanel";
-import { RequirementForm } from "./components/RequirementForm";
-import { RunList } from "./components/RunList";
-import { UiPanel } from "./components/UiPanel";
+import { api, setUnauthorizedHandler, subscribeToRun } from './api';
+import type { Health, PipelineEvent, RunDetail, RunSummary } from './types';
+import { statusTone } from './types';
+import { ConfirmModal } from './components/ConfirmModal';
+import { FileViewer } from './components/FileViewer';
+import { LoginPage } from './components/LoginPage';
+import { PipelineTimeline } from './components/PipelineTimeline';
+import { RequirementForm } from './components/RequirementForm';
+import { RunList } from './components/RunList';
+import { Alert } from './components/ui/Alert';
+import { Badge } from './components/ui/Badge';
+import { Button } from './components/ui/Button';
+import { Card, EmptyState } from './components/ui/Card';
+import { ErrorBoundary } from './components/ui/ErrorBoundary';
+import { Stat, StatGrid } from './components/ui/Stat';
+import { Tabs } from './components/ui/Tabs';
+import type { TabItem } from './components/ui/Tabs';
+import { ToastList } from './components/ui/Toast';
+import type { Toast } from './components/ui/Toast';
+
+// Split out of the main bundle. Together these three were most of the
+// 175 KB the browser downloaded before first paint, and the majority of
+// sessions never open any of them: the eval table is a diagnostics view,
+// and the UI and Playground panels only render on their own tabs.
+// React.lazy defers the download to the first render of the panel; see
+// `showEvals` for the eval table, which additionally has to not be
+// rendered at all.
+const EvalPanel = lazy(() =>
+  import('./components/EvalPanel').then(m => ({ default: m.EvalPanel }))
+);
+const UiPanel = lazy(() => import('./components/UiPanel').then(m => ({ default: m.UiPanel })));
+const PlaygroundPanel = lazy(() =>
+  import('./components/PlaygroundPanel').then(m => ({ default: m.PlaygroundPanel }))
+);
+
+function PanelFallback({ label }: { label: string }) {
+  return <p className="empty">Loading {label}…</p>;
+}
 
 type Tab =
-  | "pipeline"
-  | "stories"
-  | "plan"
-  | "spec"
-  | "code"
-  | "tests"
-  | "report"
-  | "review"
-  | "ui"
-  | "playground";
+  | 'pipeline'
+  | 'stories'
+  | 'plan'
+  | 'spec'
+  | 'code'
+  | 'tests'
+  | 'report'
+  | 'review'
+  | 'ui'
+  | 'playground';
 
-const TABS: Array<{ id: Tab; label: string }> = [
-  { id: "pipeline", label: "Pipeline" },
-  { id: "stories", label: "Stories" },
-  { id: "plan", label: "Plan" },
-  { id: "spec", label: "OpenAPI" },
-  { id: "code", label: "Code" },
-  { id: "tests", label: "Tests" },
-  { id: "report", label: "Test report" },
-  { id: "review", label: "Review" },
-  { id: "ui", label: "UI" },
-  { id: "playground", label: "Playground" },
+const TABS: ReadonlyArray<TabItem<Tab>> = [
+  { id: 'pipeline', label: 'Pipeline' },
+  { id: 'stories', label: 'Stories' },
+  { id: 'plan', label: 'Plan' },
+  { id: 'spec', label: 'OpenAPI' },
+  { id: 'code', label: 'Code' },
+  { id: 'tests', label: 'Tests' },
+  { id: 'report', label: 'Test report' },
+  { id: 'review', label: 'Review' },
+  { id: 'ui', label: 'UI' },
+  { id: 'playground', label: 'Playground' },
 ];
 
 const POLL_MS = 1500;
 
+/** Toast ids only need to be unique within a session. */
+let toastSeq = 0;
+
 export default function App() {
   // "checking" until we know whether a session exists, so we never flash the
   // app to an unauthenticated user.
-  const [authState, setAuthState] = useState<"checking" | "in" | "out">("checking");
+  const [authState, setAuthState] = useState<'checking' | 'in' | 'out'>('checking');
   const [authEnabled, setAuthEnabled] = useState(true);
   const [username, setUsername] = useState<string | null>(null);
   const [loginBusy, setLoginBusy] = useState(false);
@@ -54,14 +84,29 @@ export default function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [liveEvents, setLiveEvents] = useState<PipelineEvent[]>([]);
-  const [tab, setTab] = useState<Tab>("pipeline");
+  const [tab, setTab] = useState<Tab>('pipeline');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   // Bumped by the Playground's Refresh button to force a new iframe document.
   const [previewReload, setPreviewReload] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [evals, setEvals] = useState<Awaited<ReturnType<typeof api.evals>> | null>(null);
+  // The eval table is collapsed until asked for, which is what actually defers
+  // its chunk: React.lazy only helps if the component is not rendered at all,
+  // and this card sits below the fold on every screen.
+  const [showEvals, setShowEvals] = useState(false);
+  const [toasts, setToasts] = useState<Toast[]>([]);
 
   const unsubscribe = useRef<(() => void) | null>(null);
+
+  const pushToast = useCallback((tone: Toast['tone'], message: string) => {
+    const id = ++toastSeq;
+    setToasts(prev => [...prev.slice(-3), { id, tone, message }]);
+  }, []);
+
+  const dismissToast = useCallback((id: number) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
 
   const refreshRuns = useCallback(async () => {
     try {
@@ -83,18 +128,18 @@ export default function App() {
   useEffect(() => {
     api
       .session()
-      .then((s) => {
+      .then(s => {
         setAuthEnabled(s.auth_enabled);
         setUsername(s.username);
-        setAuthState(s.authenticated ? "in" : "out");
+        setAuthState(s.authenticated ? 'in' : 'out');
       })
-      .catch(() => setAuthState("out"));
+      .catch(() => setAuthState('out'));
   }, []);
 
   // Any 401 from anywhere drops us back to the login screen.
   useEffect(() => {
     setUnauthorizedHandler(() => {
-      setAuthState("out");
+      setAuthState('out');
       setSelected(null);
       setDetail(null);
       setRuns([]);
@@ -109,9 +154,9 @@ export default function App() {
       const s = await api.login(user, pass);
       setAuthEnabled(s.auth_enabled);
       setUsername(s.username);
-      setAuthState("in");
+      setAuthState('in');
     } catch (e) {
-      setLoginError(e instanceof Error ? e.message : "Sign-in failed");
+      setLoginError(e instanceof Error ? e.message : 'Sign-in failed');
     } finally {
       setLoginBusy(false);
     }
@@ -123,7 +168,7 @@ export default function App() {
     } catch {
       /* the cookie is cleared either way */
     }
-    setAuthState("out");
+    setAuthState('out');
     setSelected(null);
     setDetail(null);
     setRuns([]);
@@ -131,11 +176,21 @@ export default function App() {
 
   // Load dashboard data once authenticated.
   useEffect(() => {
-    if (authState !== "in") return;
+    if (authState !== 'in') return;
     refreshHealth();
     refreshRuns();
-    api.evals().then(setEvals).catch(() => undefined);
   }, [authState, refreshHealth, refreshRuns]);
+
+  // The eval results are fetched only when the panel is opened, not on login:
+  // it is a static table that changes between deployments, so there is nothing
+  // about it that a session can invalidate.
+  useEffect(() => {
+    if (authState !== 'in' || !showEvals || evals) return;
+    api
+      .evals()
+      .then(setEvals)
+      .catch(() => undefined);
+  }, [authState, showEvals, evals]);
 
   const loadDetail = useCallback(async (id: string) => {
     try {
@@ -160,9 +215,9 @@ export default function App() {
       if (cancelled) return;
       const current = await api
         .getRun(selected)
-        .then((d) => d.status)
-        .catch(() => "unknown");
-      if (current === "queued" || current === "running" || current === "stopping") {
+        .then(d => d.status)
+        .catch(() => 'unknown');
+      if (current === 'queued' || current === 'running' || current === 'stopping') {
         timer = setTimeout(tick, POLL_MS);
       } else {
         refreshRuns();
@@ -183,12 +238,12 @@ export default function App() {
     if (!selected) return;
     unsubscribe.current = subscribeToRun(
       selected,
-      (evt) => setLiveEvents((prev) => [...prev, evt as PipelineEvent]),
+      evt => setLiveEvents(prev => [...prev, evt as PipelineEvent]),
       () => {
         refreshRuns();
         void loadDetail(selected);
       },
-      () => setError("Lost connection to the event stream; falling back to polling.")
+      () => setError('Lost connection to the event stream; falling back to polling.')
     );
     return () => {
       unsubscribe.current?.();
@@ -213,8 +268,12 @@ export default function App() {
       setLiveEvents([]);
       await refreshRuns();
       setSelected(run.run_id);
+      // Starting a run is the one action with no other feedback: the
+      // list updates silently. Without this, a screen reader hears
+      // nothing at all, and a sighted user may not notice the new row.
+      pushToast('success', `Started run ${run.run_id}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to start run");
+      setError(e instanceof Error ? e.message : 'Failed to start run');
     } finally {
       setBusy(false);
     }
@@ -225,8 +284,9 @@ export default function App() {
       await api.deleteRun(id);
       if (selected === id) setSelected(null);
       await refreshRuns();
+      pushToast('success', `Deleted run ${id}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete run");
+      setError(e instanceof Error ? e.message : 'Failed to delete run');
     }
   };
 
@@ -241,8 +301,9 @@ export default function App() {
       await api.stopRun(id);
       await loadDetail(id);
       await refreshRuns();
+      pushToast('info', `Stop requested for ${id}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to stop run");
+      setError(e instanceof Error ? e.message : 'Failed to stop run');
     } finally {
       setStopping(false);
     }
@@ -258,8 +319,9 @@ export default function App() {
       setLiveEvents([]);
       await refreshRuns();
       setSelected(next.run_id);
+      pushToast('success', `Restarted as ${next.run_id}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to restart run");
+      setError(e instanceof Error ? e.message : 'Failed to restart run');
     } finally {
       setRestartBusy(false);
     }
@@ -273,8 +335,9 @@ export default function App() {
       setLiveEvents([]);
       await refreshRuns();
       setSelected(next.run_id);
+      pushToast('success', `Resumed as ${next.run_id}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to resume run");
+      setError(e instanceof Error ? e.message : 'Failed to resume run');
     } finally {
       setResuming(false);
     }
@@ -282,70 +345,78 @@ export default function App() {
 
   const events = useMemo<PipelineEvent[]>(() => {
     const fromPoll = detail?.events ?? [];
-    const seen = new Set(fromPoll.map((e) => e.seq));
-    const extra = liveEvents.filter((e) => typeof e.seq === "number" && !seen.has(e.seq));
+    const seen = new Set(fromPoll.map(e => e.seq));
+    const extra = liveEvents.filter(e => typeof e.seq === 'number' && !seen.has(e.seq));
     return [...fromPoll, ...extra].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
   }, [detail, liveEvents]);
 
-  const running = detail?.status === "running" || detail?.status === "queued";
-  const stoppingNow = detail?.status === "stopping" || stopping;
-  const stoppable = detail?.status === "running" || detail?.status === "queued";
+  const running = detail?.status === 'running' || detail?.status === 'queued';
+  const stoppingNow = detail?.status === 'stopping' || stopping;
+  const stoppable = detail?.status === 'running' || detail?.status === 'queued';
   // Restart is offered on every settled run: it deletes all data and starts
   // over, which is meaningful for failed and accepted runs alike. Resume
   // continues a non-accepted terminal run from its saved artifacts.
-  const restartable =
-    !!detail && !stoppable && detail.status !== "stopping";
+  const restartable = !!detail && !stoppable && detail.status !== 'stopping';
   const resumable =
     !!detail &&
-    ["cancelled", "unresolved", "unresolved_review", "failed", "blocked", "domain_missed"].includes(
+    ['cancelled', 'unresolved', 'unresolved_review', 'failed', 'blocked', 'domain_missed'].includes(
       detail.status
     );
-  const tone = statusTone(detail?.status ?? "idle");
+  const tone = statusTone(detail?.status ?? 'idle');
 
   const llmLabel = health
     ? health.llm.skip_ollama
-      ? "template mode"
+      ? 'template mode'
       : health.llm.ollama_reachable
         ? `ollama: ${health.llm.ollama_models.length} model(s)`
-        : "no LLM backend"
-    : "connecting…";
+        : 'no LLM backend'
+    : 'connecting…';
 
-  if (authState === "checking") {
+  if (authState === 'checking') {
     return (
       <div className="app">
-        <div className="empty" style={{ marginTop: 80 }}>
-          Checking session…
-        </div>
+        <div className="empty boot-check">Checking session…</div>
       </div>
     );
   }
 
-  if (authState === "out" && authEnabled) {
+  if (authState === 'out' && authEnabled) {
     return <LoginPage onLogin={handleLogin} error={loginError} busy={loginBusy} />;
   }
 
   return (
     <div className="app">
+      <a href="#main-content" className="skip-link">
+        Skip to main content
+      </a>
       <header className="topbar">
         <h1>Multi-Agent Software Team</h1>
         <span className="sub">plain English → tested, reviewed REST API</span>
+        <Button
+          className="sidebar-toggle"
+          aria-label="Toggle run list"
+          aria-expanded={sidebarOpen}
+          onClick={() => setSidebarOpen(!sidebarOpen)}
+          aria-controls="sidebar"
+        >
+          <span aria-hidden="true">☰</span>
+        </Button>
+        <span className="sub">plain English → tested, reviewed REST API</span>
         <div className="spacer" />
-        <span className="badge idle" title={llmLabel}>
-          <span className="dot" />
+        <Badge tone="idle" title={llmLabel}>
           {llmLabel}
-        </span>
+        </Badge>
         {authEnabled && username && (
           <>
-            <span className="badge idle" title={`signed in as ${username}`}>
-              <span className="dot" />
+            <Badge tone="idle" title={`signed in as ${username}`}>
               {username}
-            </span>
-            <button className="ghost" onClick={() => void handleLogout()}>
+            </Badge>
+            <Button variant="ghost" onClick={() => void handleLogout()}>
               Sign out
-            </button>
+            </Button>
           </>
         )}
-        <span className="sub">v{health?.version ?? "—"}</span>
+        <span className="sub">v{health?.version ?? '—'}</span>
       </header>
 
       <div className="layout">
@@ -355,300 +426,192 @@ export default function App() {
           onSelect={setSelected}
           onDelete={deleteRun}
           onRefresh={refreshRuns}
+          open={sidebarOpen}
+          onClose={() => setSidebarOpen(false)}
         />
 
-        <main className="main">
-          <RequirementForm onSubmit={startRun} busy={busy} error={error} />
+        <main className="main" id="main-content">
+          <RequirementForm
+            onSubmit={startRun}
+            busy={busy}
+            error={error}
+            onRetry={() => setError(null)}
+            onDismissError={() => setError(null)}
+          />
 
           {!detail ? (
-            <div className="card">
+            <Card>
               <h2>No run selected</h2>
-              <p className="empty">
+              <EmptyState
+                action={
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      document.getElementById('req')?.focus();
+                    }}
+                  >
+                    Write a requirement
+                  </Button>
+                }
+              >
                 Submit a requirement above, or pick a previous run from the list.
-              </p>
-            </div>
+              </EmptyState>
+            </Card>
           ) : (
             <>
-              <div className="card">
-                <div className="row" style={{ justifyContent: "space-between" }}>
-                  <div>
-                    <h2 style={{ marginBottom: 4 }}>
+              <Card label={`Run ${detail.run_id}`}>
+                <div className="run-head">
+                  <div className="run-title">
+                    <h2>
                       Run <code>{detail.run_id}</code>
                     </h2>
-                    <span className={`badge ${tone}`}>
-                      <span className={`dot${running || stoppingNow ? " pulse" : ""}`} />
-                      {detail.status}
+                    {/* A run's status changes on its own, so it is a
+                        live region: settling at `accepted` is the
+                        moment a user is waiting for. */}
+                    <span role="status" className="run-status">
+                      <Badge tone={tone} pulse={running || stoppingNow}>
+                        {detail.status}
+                      </Badge>
                     </span>
+                  </div>
+                  <div className="row run-actions">
                     {stoppable && (
-                      <button
-                        className="ghost"
-                        style={{ marginLeft: 8 }}
+                      <Button
+                        variant="ghost"
                         disabled={stopping}
+                        loading={stopping}
+                        loadingLabel="Stopping…"
                         onClick={() => void stopRun(detail.run_id)}
                         title="Request cancellation; the run settles at cancelled"
                       >
-                        {stopping ? "Stopping…" : "Stop"}
-                      </button>
+                        Stop
+                      </Button>
                     )}
-                    {stoppingNow && !stoppable && (
-                      <span className="hint" style={{ marginLeft: 8 }}>
-                        Stopping…
-                      </span>
-                    )}
+                    {stoppingNow && !stoppable && <span className="hint">Stopping…</span>}
                     {restartable && (
-                      <button
-                        className="ghost"
-                        style={{ marginLeft: 8 }}
+                      <Button
+                        variant="ghost"
                         onClick={() => setRestartTarget(detail.run_id)}
                         title="Delete all of this run's data and start over"
                       >
                         Restart
-                      </button>
+                      </Button>
                     )}
                     {resumable && (
-                      <button
-                        className="ghost"
-                        style={{ marginLeft: 8 }}
+                      <Button
+                        variant="ghost"
                         disabled={resuming}
+                        loading={resuming}
+                        loadingLabel="Resuming…"
                         onClick={() => void resumeRun(detail.run_id)}
                         title="Continue this run from its saved artifacts (nothing is deleted)"
                       >
-                        {resuming ? "Resuming…" : "Resume"}
-                      </button>
-                    )}
-                    {detail.resumed_from && (
-                      <span className="hint" style={{ marginLeft: 8 }}>
-                        Resumed from <code>{detail.resumed_from}</code>
-                      </span>
-                    )}
-                    {detail.error && (
-                      <span className="hint" style={{ marginLeft: 8 }}>
-                        {detail.error}
-                      </span>
+                        Resume
+                      </Button>
                     )}
                   </div>
                 </div>
-                <div className="stats" style={{ marginTop: 12, marginBottom: 0 }}>
-                  <div className="stat">
-                    <div className="v">{detail.tests_passed}</div>
-                    <div className="k">Tests passed</div>
+                {detail.resumed_from && (
+                  <div className="hint run-meta">
+                    Resumed from <code>{detail.resumed_from}</code>
                   </div>
-                  <div className="stat">
-                    <div className="v">{detail.tests_failed}</div>
-                    <div className="k">Failed</div>
-                  </div>
-                  <div className="stat">
-                    <div className="v">{detail.attempts_dev}</div>
-                    <div className="k">Dev retries</div>
-                  </div>
-                  <div className="stat">
-                    <div className="v">{detail.attempts_test}</div>
-                    <div className="k">Test retries</div>
-                  </div>
-                  <div className="stat">
-                    <div className="v">{detail.review_rounds}</div>
-                    <div className="k">Review rounds</div>
-                  </div>
-                  <div className="stat">
-                    <div className="v">{detail.wall_time ?? "—"}</div>
-                    <div className="k">Wall (s)</div>
-                  </div>
-                </div>
+                )}
+                {detail.error && (
+                  <Alert tone="error" className="run-meta">
+                    {detail.error}
+                  </Alert>
+                )}
+
+                <StatGrid className="run-stats">
+                  <Stat value={detail.tests_passed} label="Tests passed" />
+                  <Stat value={detail.tests_failed} label="Failed" />
+                  <Stat value={detail.attempts_dev} label="Dev retries" />
+                  <Stat value={detail.attempts_test} label="Test retries" />
+                  <Stat value={detail.review_rounds} label="Review rounds" />
+                  <Stat value={detail.wall_time ?? '—'} label="Wall (s)" />
+                </StatGrid>
+
                 {detail.entrypoint && (
-                  <div className="hint" style={{ marginTop: 10 }}>
-                    Entrypoint{" "}
+                  <div className="hint run-meta">
+                    Entrypoint{' '}
                     <code>
                       {detail.entrypoint}
-                      {detail.files ? ` · ${detail.files.join(", ")}` : ""}
+                      {detail.files ? ` · ${detail.files.join(', ')}` : ''}
                     </code>
                   </div>
                 )}
                 {detail.coverage && detail.coverage.conclusive && (
-                  <div className={`alert ${detail.coverage.missing.length ? "error" : "note"}`} style={{ marginTop: 10 }}>
-                    Domain check:{" "}
+                  <Alert
+                    tone={detail.coverage.missing.length ? 'error' : 'note'}
+                    className="run-meta"
+                  >
+                    Domain check:{' '}
                     {detail.coverage.missing.length === 0
                       ? `all requirement terms present (${detail.coverage.covered.length})`
-                      : `missing ${detail.coverage.missing.join(", ")}`}
-                  </div>
+                      : `missing ${detail.coverage.missing.join(', ')}`}
+                  </Alert>
                 )}
                 {detail.ui_report && (
-                  <div className={`alert ${detail.ui_report.ok ? "note" : "error"}`} style={{ marginTop: 10 }}>
-                    UI gate:{" "}
+                  <Alert tone={detail.ui_report.ok ? 'note' : 'error'} className="run-meta">
+                    UI gate:{' '}
                     {detail.ui_report.ok
-                      ? "all static checks passed"
+                      ? 'all static checks passed'
                       : `failed ${detail.ui_report.checks
-                          .filter((c) => !c.ok)
-                          .map((c) => c.name)
-                          .join(", ")} (advisory)`}
-                  </div>
+                          .filter(c => !c.ok)
+                          .map(c => c.name)
+                          .join(', ')} (advisory)`}
+                  </Alert>
                 )}
-              </div>
+              </Card>
 
-              <div className="tabs">
-                {TABS.map((t) => (
-                  <button
-                    key={t.id}
-                    className={tab === t.id ? "active" : ""}
-                    onClick={() => setTab(t.id)}
-                  >
-                    {t.label}
-                    {t.id === "review" && detail.review?.comments?.length
+              <Tabs
+                label="Run detail"
+                value={tab}
+                onChange={setTab}
+                items={[...TABS].map(t => ({
+                  ...t,
+                  badge:
+                    t.id === 'review' && detail.review?.comments?.length
                       ? ` (${detail.review.comments.length})`
-                      : ""}
-                    {t.id === "ui" && Object.keys(detail.ui_code ?? {}).length
-                      ? ` (${Object.keys(detail.ui_code ?? {}).length})`
-                      : ""}
-                  </button>
-                ))}
-              </div>
-
-              {tab === "pipeline" && <PipelineTimeline events={events} running={running} />}
-
-              {tab === "stories" &&
-                (detail.stories?.stories?.length ? (
-                  <div className="card">
-                    {detail.stories.clarifying_question && (
-                      <div className="alert note">
-                        Clarifying question: {detail.stories.clarifying_question}
-                      </div>
-                    )}
-                    {detail.stories.stories.map((s) => (
-                      <div key={s.id} className="story">
-                        <div className="id">{s.id}</div>
-                        <div className="title">{s.title}</div>
-                        <ul>
-                          {s.acceptance.map((a, i) => (
-                            <li key={i}>{a}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="empty">No stories yet.</p>
-                ))}
-
-              {tab === "plan" &&
-                (detail.plan ? (
-                  <div className="card plan">
-                    {!detail.plan.structured && (
-                      <div className="alert note">
-                        The model answered in prose instead of the JSON block, so this is its
-                        own wording rather than a parsed plan.
-                      </div>
-                    )}
-                    <h3>Approach</h3>
-                    <p className="approach">{detail.plan.approach}</p>
-                    {(
-                      [
-                        ["Decisions", detail.plan.decisions],
-                        ["Risks", detail.plan.risks],
-                        ["Edge cases", detail.plan.edge_cases],
-                        ["Open questions", detail.plan.open_questions],
-                      ] as Array<[string, string[]]>
-                    ).map(([title, items]) =>
-                      items.length ? (
-                        <div key={title} className="section">
-                          <div className="hint caps">
-                            {title} ({items.length})
-                          </div>
-                          <ul>
-                            {items.map((it, i) => (
-                              <li key={i}>{it}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      ) : null
-                    )}
-                    <p className="hint footer">
-                      Advisory: it guides the Designer and Developer. The Tester and Reviewer
-                      never see it — a run is graded on its contract and its tests.
-                    </p>
-                  </div>
-                ) : (
-                  <p className="empty">
-                    No plan yet. The reasoner node has not produced one, or it was ablated for
-                    this run.
-                  </p>
-                ))}
-
-              {tab === "spec" &&
-                (detail.spec ? (
-                  <pre className="code">{detail.spec}</pre>
-                ) : (
-                  <p className="empty">No OpenAPI spec yet.</p>
-                ))}
-
-              {tab === "code" && <FileViewer files={detail.code} emptyHint="No code generated." />}
-
-              {tab === "tests" && (
-                <FileViewer files={detail.tests} emptyHint="No tests generated." />
-              )}
-
-              {tab === "report" &&
-                (detail.report ? (
-                  <div className="card">
-                    <div className="stats">
-                      <div className="stat">
-                        <div className="v">{detail.report.passed}</div>
-                        <div className="k">Passed</div>
-                      </div>
-                      <div className="stat">
-                        <div className="v">{detail.report.failed}</div>
-                        <div className="k">Failed</div>
-                      </div>
-                    </div>
-                    {detail.report.raw && <pre className="code">{detail.report.raw}</pre>}
-                    {detail.memory.length > 0 && (
-                      <>
-                        <h3 style={{ marginTop: 16 }}>Reflections</h3>
-                        {detail.memory.map((m, i) => (
-                          <p key={i} className="hint" style={{ color: "var(--text-dim)" }}>
-                            {m}
-                          </p>
-                        ))}
-                      </>
-                    )}
-                  </div>
-                ) : (
-                  <p className="empty">No test report yet.</p>
-                ))}
-
-              {tab === "review" &&
-                (detail.review?.comments?.length ? (
-                  <div className="card">
-                    {detail.review.comments.map((c, i) => (
-                      <div key={i} className="comment">
-                        <span className={`sev ${c.severity}`}>{c.severity}</span>
-                        <div>
-                          <div className="msg">{c.message}</div>
-                          {c.location && <div className="loc">{c.location}</div>}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="empty">No review comments yet.</p>
-                ))}
-
-              {tab === "ui" && <UiPanel detail={detail} />}
-
-              {tab === "playground" && (
-                <PlaygroundPanel
-                  run={detail}
-                  reloadKey={previewReload}
-                  onReload={() => setPreviewReload((n) => n + 1)}
-                />
-              )}
+                      : t.id === 'ui' && Object.keys(detail.ui_code ?? {}).length
+                        ? ` (${Object.keys(detail.ui_code ?? {}).length})`
+                        : undefined,
+                }))}
+              >
+                <ErrorBoundary label="This tab">
+                  {renderTab(tab, {
+                    detail,
+                    events,
+                    running,
+                    previewReload,
+                    setPreviewReload,
+                  })}
+                </ErrorBoundary>
+              </Tabs>
             </>
           )}
 
-          <div className="card">
-            <h2>Evaluation</h2>
-            <EvalPanel data={evals} />
-          </div>
+          <Card label="Evaluation">
+            <h2>
+              <button
+                type="button"
+                className="linklike"
+                aria-expanded={showEvals}
+                onClick={() => setShowEvals(v => !v)}
+              >
+                {showEvals ? 'Hide' : 'Show'} evaluation
+              </button>
+            </h2>
+            {showEvals && (
+              <Suspense fallback={<PanelFallback label="evaluation" />}>
+                <EvalPanel data={evals} />
+              </Suspense>
+            )}
+          </Card>
         </main>
       </div>
+
+      <ToastList toasts={toasts} onDismiss={dismissToast} />
 
       {restartTarget && (
         <ConfirmModal
@@ -656,10 +619,9 @@ export default function App() {
           body={
             <>
               <p>
-                This will stop the pipeline if it is still running,{" "}
-                <strong>permanently delete all of this run&apos;s data</strong>{" "}
-                (stories, spec, code, tests, reports), and start a fresh run
-                with the same requirement.
+                This will stop the pipeline if it is still running,{' '}
+                <strong>permanently delete all of this run&apos;s data</strong> (stories, spec,
+                code, tests, reports), and start a fresh run with the same requirement.
               </p>
               <p className="hint">This cannot be undone.</p>
             </>
@@ -674,4 +636,171 @@ export default function App() {
       )}
     </div>
   );
+}
+
+interface TabContext {
+  detail: RunDetail;
+  events: PipelineEvent[];
+  running: boolean;
+  previewReload: number;
+  setPreviewReload: (_fn: (_n: number) => number) => void;
+}
+
+/**
+ * The active tab's panel.
+ *
+ * Kept as a function rather than a map so the tab bodies can read
+ * `detail` directly and so an unknown tab id cannot render anything.
+ */
+function renderTab(
+  tab: Tab,
+  { detail, events, running, previewReload, setPreviewReload }: TabContext
+) {
+  switch (tab) {
+    case 'pipeline':
+      return <PipelineTimeline events={events} running={running} />;
+
+    case 'stories':
+      return detail.stories?.stories?.length ? (
+        <Card label="Stories">
+          {detail.stories.clarifying_question && (
+            <Alert tone="note">Clarifying question: {detail.stories.clarifying_question}</Alert>
+          )}
+          {detail.stories.stories.map(s => (
+            <article key={s.id} className="story">
+              <div className="id">{s.id}</div>
+              <h3 className="title">{s.title}</h3>
+              <ul>
+                {s.acceptance.map((a, i) => (
+                  <li key={i}>{a}</li>
+                ))}
+              </ul>
+            </article>
+          ))}
+        </Card>
+      ) : (
+        <EmptyState>
+          No stories yet. The PM node writes them first, so they appear as soon as the run starts.
+        </EmptyState>
+      );
+
+    case 'plan':
+      return detail.plan ? (
+        <Card className="plan" label="Plan">
+          {!detail.plan.structured && (
+            <Alert tone="note">
+              The model answered in prose instead of the JSON block, so this is its own wording
+              rather than a parsed plan.
+            </Alert>
+          )}
+          <h3>Approach</h3>
+          <p className="approach">{detail.plan.approach}</p>
+          {(
+            [
+              ['Decisions', detail.plan.decisions],
+              ['Risks', detail.plan.risks],
+              ['Edge cases', detail.plan.edge_cases],
+              ['Open questions', detail.plan.open_questions],
+            ] as Array<[string, string[]]>
+          ).map(([title, items]) =>
+            items.length ? (
+              <section key={title} className="section">
+                <div className="hint caps">
+                  {title} ({items.length})
+                </div>
+                <ul>
+                  {items.map((it, i) => (
+                    <li key={i}>{it}</li>
+                  ))}
+                </ul>
+              </section>
+            ) : null
+          )}
+          <p className="hint footer">
+            Advisory: it guides the Designer and Developer. The Tester and Reviewer never see it — a
+            run is graded on its contract and its tests.
+          </p>
+        </Card>
+      ) : (
+        <EmptyState>
+          No plan yet. The reasoner node has not produced one, or it was ablated for this run.
+        </EmptyState>
+      );
+
+    case 'spec':
+      return detail.spec ? (
+        <pre className="code">{detail.spec}</pre>
+      ) : (
+        <EmptyState>No OpenAPI spec yet.</EmptyState>
+      );
+
+    case 'code':
+      return <FileViewer files={detail.code} emptyHint="No code generated." />;
+
+    case 'tests':
+      return <FileViewer files={detail.tests} emptyHint="No tests generated." />;
+
+    case 'report':
+      return detail.report ? (
+        <Card label="Test report">
+          <StatGrid>
+            <Stat value={detail.report.passed} label="Passed" />
+            <Stat value={detail.report.failed} label="Failed" />
+          </StatGrid>
+          {detail.report.raw && <pre className="code">{detail.report.raw}</pre>}
+          {detail.memory.length > 0 && (
+            <>
+              <h3>Reflections</h3>
+              {detail.memory.map((m, i) => (
+                <p key={i} className="hint">
+                  {m}
+                </p>
+              ))}
+            </>
+          )}
+        </Card>
+      ) : (
+        <EmptyState>No test report yet.</EmptyState>
+      );
+
+    case 'review':
+      return detail.review?.comments?.length ? (
+        <Card label="Review">
+          {detail.review.comments.map((c, i) => (
+            <div key={i} className="comment">
+              <span className={`sev ${c.severity}`}>{c.severity}</span>
+              <div>
+                <div className="msg">{c.message}</div>
+                {c.location && <div className="loc">{c.location}</div>}
+              </div>
+            </div>
+          ))}
+        </Card>
+      ) : (
+        <EmptyState>No review comments yet.</EmptyState>
+      );
+
+    case 'ui':
+      // Both lazy panels need a Suspense boundary above them. Selecting a tab is
+      // a synchronous state change, and a lazy component that suspends in
+      // response to one takes the whole tree down with it — React throws
+      // "A component suspended while responding to synchronous input" unless
+      // the update is wrapped, or a boundary is already in place.
+      return (
+        <Suspense fallback={<PanelFallback label="UI panel" />}>
+          <UiPanel detail={detail} />
+        </Suspense>
+      );
+
+    case 'playground':
+      return (
+        <Suspense fallback={<PanelFallback label="playground" />}>
+          <PlaygroundPanel
+            run={detail}
+            reloadKey={previewReload}
+            onReload={() => setPreviewReload(n => n + 1)}
+          />
+        </Suspense>
+      );
+  }
 }

@@ -1,0 +1,20 @@
+{
+  "requirement": "Build a library REST API that lends books: CRUD /books with ISBN validation and /loans, 404 on unknown ISBN.",
+  "stories": [
+    {
+      "id": "US1",
+      "title": "List books",
+      "acceptance": [
+        "GET /books returns 200"
+      ]
+    },
+    {
+      "id": "US2",
+      "title": "Look a book up by ISBN",
+      "acceptance": [
+        "GET /books/{isbn} 404 on unknown ISBN"
+      ]
+    }
+  ],
+  "clarifying_question": "Should loans be a separate resource, or fields on a book?"
+}

@@ -9,6 +9,13 @@ import os
 
 os.environ.setdefault("SKIP_OLLAMA", "1")
 os.environ.setdefault("AGENT_TEAM_TESTING", "1")
+# The offline suite must not depend on a container engine. With SANDBOX_MODE
+# defaulting to `container`, a developer machine that happens to have Docker
+# running would have every workflow test build and start a container, turning a
+# one-second test into a thirty-second one and failing it for want of a
+# network. Container behaviour is covered deliberately and explicitly by
+# backend/tests/test_sandbox_runner.py instead.
+os.environ["SANDBOX_MODE"] = "subprocess"
 # A developer's .env must never influence a test run.
 os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 

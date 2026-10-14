@@ -1,0 +1,35 @@
+# The sandbox wheelhouse.
+#
+# This file is the boundary of what a generated app can import. The sandbox
+# network is `internal: true` (SANDBOX_AND_SCALE_PLAN.md §3.1), so there is no
+# route to PyPI and a `pip install` inside the container cannot succeed; every
+# package a generated app might plausibly need has to be baked in here instead.
+#
+# Adding something here is how you make a dependency available. The cost is
+# image size and a rebuild, so add what generated apps realistically import and
+# nothing speculative.
+#
+# Keep the Python version identical to backend/Dockerfile. A 3.11 sandbox and a
+# 3.12 app meant 3.12-only syntax passed the pipeline and failed the sandbox.
+fastapi>=0.110
+uvicorn>=0.29
+sqlalchemy>=2.0
+pydantic>=2.6
+pydantic-settings>=2.2
+httpx>=0.27
+pyyaml>=6.0
+python-multipart>=0.0.9
+email-validator>=2.1
+# Generated apps that declare a Postgres DATABASE_URL (SANDBOX_AND_SCALE_PLAN.md
+# §8.2) need the driver present, or every one of them fails to boot with an
+# ImportError that looks nothing like the cause.
+psycopg[binary]>=3.2
+aiosqlite>=0.20
+
+# The runner drives these three inside the same container, so they are here
+# rather than in the backend image: with SANDBOX_MODE=subprocess switched off,
+# the backend never executes generated code at all.
+pytest>=8.0
+ruff>=0.4
+bandit>=1.7
+openapi-spec-validator>=0.7

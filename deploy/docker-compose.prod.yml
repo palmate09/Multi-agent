@@ -1,7 +1,19 @@
 # Production stack for a single GCP VM.
-#   Caddy (TLS + static SPA fallback) -> frontend (nginx, serves built assets)
-#                                                 -> backend (FastAPI)
-# Run artifacts live on a named volume; /data/runs is NOT exposed to the host.
+#
+#   caddy (TLS) -> frontend (nginx: SPA + /api + /preview) -> backend (FastAPI)
+#                                                        -> postgres
+#                                                        -> sandbox sidecar
+#
+# Two networks, and the split is the point:
+#
+#   edge    caddy, frontend, backend. Carries the internet and TLS.
+#   inner   backend, postgres, sandbox. `internal: true` -- no route out.
+#
+# The backend sits on both because it needs to answer the browser and it needs
+# to reach the sandbox. It does not itself hold a container engine: the only
+# service with /var/run/docker.sock mounted is `sandbox`, which exposes two
+# endpoints and nothing else. See SANDBOX_AND_SCALE_PLAN.md §3.3 and §9.
+#
 # Must differ from the root docker-compose.yml (see the note there).
 name: multi-agent-team
 
@@ -39,6 +51,33 @@ services:
         condition: service_healthy
     networks: [edge]
 
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-mat}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?missing - run ./deploy/bootstrap-env.sh}"
+      POSTGRES_DB: "${POSTGRES_DB:-mat}"
+      # SCRAM, never `trust`: the backend is the only client, but `trust` would
+      # mean any process that reached the port authenticated as the superuser.
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+    command:
+      - postgres
+      - -c
+      - max_connections=50
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    networks: [inner]
+
   backend:
     image: "${REGISTRY:-ghcr.io/yourorg}/multi-agent-backend:${TAG:-latest}"
     build:
@@ -49,11 +88,27 @@ services:
       ENVIRONMENT: production
       DEBUG: "false"
       RUNS_DIR: /data/runs
-      # Ollama runs on the host; reach it over the docker bridge gateway.
+      # ---- sandbox ----
+      # `container` is the only mode that executes generated code safely, and
+      # it is the default. `subprocess` runs it as an ordinary child of this
+      # process on the host with the host's filesystem and network; it exists
+      # for development and is never the deployed posture.
+      SANDBOX_MODE: "${SANDBOX_MODE:-container}"
+      # The backend talks to the sidecar over HTTP, not to a socket.
+      SANDBOX_API_URL: "http://sandbox:8001"
+      RUNS_VOLUME: runs-data
+      # Must match the sidecar's, or the backend builds containers the sidecar
+      # refuses to start.
+      SANDBOX_IMAGE: "${SANDBOX_IMAGE:-agent-team-sandbox:local}"
+      SANDBOX_NETWORK: sandbox-net
+      SANDBOX_MAX_CONCURRENT: "${SANDBOX_MAX_CONCURRENT:-4}"
+      SANDBOX_MEMORY: "${SANDBOX_MEMORY:-512m}"
+      SANDBOX_CPUS: "${SANDBOX_CPUS:-1}"
+      SANDBOX_PIDS_LIMIT: "${SANDBOX_PIDS_LIMIT:-256}"
+      # ---- database (the index; artifacts stay in the runs volume) ----
+      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-mat}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-mat}"
+      # ---- Ollama runs on the host; reach it over the docker bridge gateway ----
       OLLAMA_URL: "${OLLAMA_URL:-http://host.docker.internal:11434}"
-      # Per-role models. The Designer uses the larger one for structured YAML
-      # quality; the code-generating roles use the smaller one because at ~12
-      # vs ~6.5 tok/s on CPU it halves wall time.
       OLLAMA_MODEL_PM: "${OLLAMA_MODEL_PM:-qwen2.5-coder:3b}"
       OLLAMA_MODEL_DESIGNER: "${OLLAMA_MODEL_DESIGNER:-qwen2.5-coder:7b-instruct-q4_K_M}"
       OLLAMA_MODEL_DEVELOPER: "${OLLAMA_MODEL_DEVELOPER:-qwen2.5-coder:3b}"
@@ -63,13 +118,14 @@ services:
       # seconds, for a full code generation.
       OLLAMA_TIMEOUT: "${OLLAMA_TIMEOUT:-600}"
       SKIP_OLLAMA: "${SKIP_OLLAMA:-1}"
-      # Provider selection: gemini (fast, needs a key) or local (Ollama).
       LLM_PROVIDER: "${LLM_PROVIDER:-gemini}"
       LLM_TIMEOUT: "${LLM_TIMEOUT:-120}"
       GEMINI_MODELS: "${GEMINI_MODELS:-gemini-3-flash-preview,gemini-flash-latest,gemini-3.8-flash}"
-      GEMINI_MAX_OUTPUT_TOKENS: "${GEMINI_MAX_OUTPUT_TOKENS:-8192}"
-      # 1 = never fall back to a hosted key when a local model is available, so a
-      # rate-limited key cannot silently change what the run produces.
+      # Left unset on purpose: every backend takes its completion ceiling from
+      # the per-role table in agents/llm.py (triage 500, reflection 800,
+      # developer 8000). Setting this restores one flat ceiling for every role,
+      # which is the latency defect Phase 1 removed.
+      GEMINI_MAX_OUTPUT_TOKENS: "${GEMINI_MAX_OUTPUT_TOKENS:-}"
       PREFER_LOCAL_ONLY: "${PREFER_LOCAL_ONLY:-0}"
       # ---- auth (run ./deploy/bootstrap-env.sh to generate these) ----
       AUTH_USERNAME: "${AUTH_USERNAME:-admin}"
@@ -82,12 +138,9 @@ services:
       MAX_CONCURRENT_RUNS: "${MAX_CONCURRENT_RUNS:-2}"
       MAX_REQUIREMENT_CHARS: "8000"
       RUN_TIMEOUT_SECONDS: "3600"
-      # Generated code is executed by pytest in a subprocess. Docker is not
-      # available inside this container, so the local fallback runs; see
-      # docs/DEPLOY.md for the isolation trade-off.
-      SANDBOX_USE_DOCKER: "${SANDBOX_USE_DOCKER:-false}"
+      # Executing generated code has to be a decision somebody made.
+      PREVIEW_ALLOW_START: "${PREVIEW_ALLOW_START:-1}"
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
-      # Pin a single id if desired; otherwise GEMINI_MODELS above is used.
       GEMINI_MODEL: "${GEMINI_MODEL:-}"
       GROQ_API_KEY: "${GROQ_API_KEY:-}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
@@ -98,6 +151,11 @@ services:
       - runs-data:/data/runs
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      sandbox:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
       interval: 30s
@@ -106,14 +164,80 @@ services:
       start_period: 30s
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
     deploy:
       resources:
         limits:
           memory: 4g
-    networks: [edge]
+    networks: [edge, inner, sandbox-net]
 
-  # Optional: bring your own LLM on the VM. Enable with:
-  #   docker compose -f deploy/docker-compose.prod.yml --profile ollama up -d
+  # The only service with a Docker socket. It starts and stops containers and
+  # does nothing else; the backend reaches it over the internal network.
+  #
+  # It runs the *backend* image with a different command, for the same reason
+  # the sandbox image serves both pytest and uvicorn: one image, two roles, and
+  # no second thing to build, push and keep in sync. It already contains
+  # fastapi, uvicorn and the sandbox package.
+  sandbox:
+    image: "${REGISTRY:-ghcr.io/yourorg}/multi-agent-backend:${TAG:-latest}"
+    restart: unless-stopped
+    command:
+      - uvicorn
+      - sandbox.sidecar:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+      - --no-access-log
+    environment:
+      # The runs volume, mounted at the same path the backend uses, so the
+      # backend's `RUNS_DIR` is a path the sidecar will accept as a mount.
+      SANDBOX_MOUNT_ROOT: /data/runs
+      SANDBOX_IMAGE_ALLOWLIST: agent-team-sandbox
+      SANDBOX_NETWORK: sandbox-net
+      # The image generated code actually runs in. Published by CI from
+      # backend/sandbox; the sidecar builds it only if it is missing locally.
+      SANDBOX_IMAGE: "${SANDBOX_IMAGE:-agent-team-sandbox:local}"
+      SANDBOX_MEMORY: "${SANDBOX_MEMORY:-512m}"
+      SANDBOX_CPUS: "${SANDBOX_CPUS:-1}"
+      SANDBOX_MAX_CONCURRENT: "${SANDBOX_MAX_CONCURRENT:-4}"
+      # Read-only root filesystem: BuildKit and the docker CLI both want
+      # somewhere to put a config file.
+      HOME: /tmp
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Read-only: the sidecar starts containers and never writes artifacts.
+      - runs-data:/data/runs:ro
+      # The sandbox build context, so the image can be rebuilt in place rather
+      # than requiring a separate `docker build` on the host.
+      - ../backend/sandbox:/app/sandbox:ro
+    # docker.sock is root:<docker-gid> mode 660 and this service is uid 10001,
+    # so without a supplementary group it is refused a socket it was explicitly
+    # given -- `engine: false`, and every request fails. The GID is
+    # host-specific (999 on some distributions, 1001 here), so start.sh exports
+    # DOCKER_GID read off the socket itself; the default keeps a bare
+    # `docker compose up` working on a host that uses the common 1001.
+    group_add:
+      - "${DOCKER_GID:-1001}"
+    healthcheck:
+      # `engine` is checked, not just process liveness: a sidecar with a dead
+      # socket is alive and useless, and compose would happily wire the backend
+      # to it.
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8001/health | grep -q 'engine.*true'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks: [inner]
+
+  # Bring your own LLM on the VM. Behind a profile on purpose: an idle 8 GB
+  # container is a large waste when hosted tiers are configured, and a profile
+  # means "not started" rather than "started and ignored".
   ollama:
     image: ollama/ollama:latest
     profiles: ["ollama"]
@@ -122,15 +246,32 @@ services:
       - ollama-models:/root/.ollama
     environment:
       OLLAMA_KEEP_ALIVE: "30m"
-    # No published port: the backend reaches it over the internal network.
+    # No published port: the backend reaches it over the edge network.
     networks: [edge]
 
 networks:
+  # Carries the internet and TLS. The only network a browser-facing service is
+  # ever directly attached to.
   edge:
     driver: bridge
+  # No gateway, no route off the host. Generated code runs here, so this is the
+  # control that makes it unable to exfiltrate while still reaching postgres.
+  inner:
+    driver: bridge
+    internal: true
 
+  # Declared here rather than created on demand by the runner, because compose
+  # has to attach a service to it -- and the one service that must be on it is
+  # the sidecar. `internal: true` matches what `sandbox/docker.ensure_network`
+  # would have created. `name:` keeps it stable across projects, because the
+  # sidecar refers to it by the bare string "sandbox-net".
+  sandbox-net:
+    name: sandbox-net
+    driver: bridge
+    internal: true
 volumes:
   runs-data:
+  pgdata:
   caddy-data:
   caddy-config:
   ollama-models:

@@ -1,71 +1,120 @@
-import type { RunSummary } from "../types";
-import { statusTone } from "../types";
+import type { RunSummary } from '../types';
+import { statusTone } from '../types';
+import { formatDateTime } from '../lib/format';
+import { Badge } from './ui/Badge';
+import { Button } from './ui/Button';
+import { ConfirmModal } from './ConfirmModal';
+import { EmptyState } from './ui/Card';
+import { useState } from 'react';
 
 interface Props {
   runs: RunSummary[];
   selected: string | null;
-  onSelect: (id: string) => void;
-  onDelete: (id: string) => void;
+  onSelect: (_id: string) => void;
+  onDelete: (_id: string) => void;
   onRefresh: () => void;
+  /** Whether the sidebar drawer is open (mobile). */
+  open?: boolean;
+  /** Called when the sidebar should close (e.g. after selecting a run). */
+  onClose?: () => void;
 }
 
-function shortTime(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleDateString([], { month: "short", day: "numeric" }) +
-      " " + d.toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit" });
-  } catch {
-    return iso;
-  }
-}
+/**
+ * The run list.
+ *
+ * Previously each row was a `role="button"` div with a real delete `<button>`
+ * inside it, which is the nested-interactive failure: the outer element claims
+ * to be a button while containing one, so a screen reader announces a button
+ * inside a button and the key handling disagrees between the two. A row is now
+ * a plain container with two sibling controls — the row's own button, and the
+ * delete button beside it — so there is exactly one interactive target per
+ * action and neither nests inside the other.
+ */
+export function RunList({
+  runs,
+  selected,
+  onSelect,
+  onDelete,
+  onRefresh,
+  open = false,
+  onClose,
+}: Props) {
+  const [pendingDelete, setPendingDelete] = useState<RunSummary | null>(null);
 
-export function RunList({ runs, selected, onSelect, onDelete, onRefresh }: Props) {
+  // Close the mobile drawer when a run is selected
+  const handleSelect = (id: string) => {
+    onSelect(id);
+    onClose?.();
+  };
+
   return (
-    <div className="sidebar">
+    <nav id="sidebar" className={`sidebar${open ? ' open' : ''}`} aria-label="Pipeline runs">
       <div className="side-head">
         <span className="side-title">Runs</span>
-        <button className="ghost" onClick={onRefresh} title="Refresh list">
-          ↻
-        </button>
+        <Button variant="ghost" size="sm" onClick={onRefresh} aria-label="Refresh run list">
+          <span aria-hidden="true">↻</span>
+        </Button>
       </div>
-      {runs.length === 0 && <p className="empty">No runs yet.</p>}
-      {runs.map((run) => {
-        const tone = statusTone(run.status);
-        return (
-          <div
-            key={run.run_id}
-            className={`run-item${selected === run.run_id ? " active" : ""}`}
-            onClick={() => onSelect(run.run_id)}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onSelect(run.run_id);
-              }
-            }}
-          >
-            <div className="req">{run.requirement}</div>
-            <div className="meta">
-              <span className={`badge ${tone}`}>
-                <span className={`dot${run.status === "running" || run.status === "stopping" ? " pulse" : ""}`} />
-                {run.status}
-              </span>
-              <span>{shortTime(run.created_at)}</span>
+
+      {runs.length === 0 && <EmptyState>No runs yet.</EmptyState>}
+
+      <ul className="run-list">
+        {runs.map(run => {
+          const active = selected === run.run_id;
+          const tone = statusTone(run.status);
+          const moving = run.status === 'running' || run.status === 'stopping';
+
+          return (
+            <li key={run.run_id} className={`run-item${active ? ' active' : ''}`}>
               <button
-                className="ghost"
-                title="Delete run"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDelete(run.run_id);
-                }}
+                type="button"
+                className="run-open"
+                onClick={() => handleSelect(run.run_id)}
+                aria-current={active ? 'true' : undefined}
               >
-                ✕
+                <span className="req">{run.requirement}</span>
+                <span className="meta">
+                  <Badge tone={tone} pulse={moving}>
+                    {run.status}
+                  </Badge>
+                  <span className="meta-time">{formatDateTime(run.created_at)}</span>
+                </span>
               </button>
-            </div>
-          </div>
-        );
-      })}
-    </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="run-delete"
+                onClick={() => setPendingDelete(run)}
+                aria-label={`Delete run ${run.run_id}`}
+              >
+                <span aria-hidden="true">✕</span>
+              </Button>
+            </li>
+          );
+        })}
+      </ul>
+
+      {pendingDelete && (
+        <ConfirmModal
+          title={`Delete run ${pendingDelete.run_id}?`}
+          confirmLabel="Delete run"
+          busy={false}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={() => {
+            onDelete(pendingDelete.run_id);
+            setPendingDelete(null);
+          }}
+          body={
+            <>
+              <p>
+                This permanently deletes everything this run produced (stories, spec, code, tests,
+                reports). This cannot be undone.
+              </p>
+              <p className="hint">{pendingDelete.requirement}</p>
+            </>
+          }
+        />
+      )}
+    </nav>
   );
 }

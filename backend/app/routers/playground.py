@@ -149,13 +149,17 @@ async def preview_proxy(
             detail=f"no running preview for run '{run_id}'",
         )
 
-    target = f"http://127.0.0.1:{session.port}/{path}"
+    # `session.base_url`, not a hardcoded 127.0.0.1: the gateway's contract is
+    # unchanged -- it still proxies to whatever address the session holds -- but
+    # that address is the container's own in container mode and loopback in
+    # subprocess mode. The client still only ever sees /preview/<rid>/.
+    target = f"{session.base_url}/{path}"
     forwarded = {
         k: v
         for k, v in request.headers.items()
         if k.lower() not in _HOP_BY_HOP and k.lower() not in {"host", "content-length"}
     }
-    forwarded["host"] = f"127.0.0.1:{session.port}"
+    forwarded["host"] = f"{session.host}:{session.port}"
 
     try:
         # A client per request: timeout and connection handling stay local to

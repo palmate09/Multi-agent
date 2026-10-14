@@ -1,22 +1,30 @@
-"""Playground: run a generated app as a live subprocess and keep it addressable.
+"""Playground: run a generated app and keep it addressable.
 
-One :class:`PreviewSession` per run. The app is copied to its own directory,
-booted with uvicorn on an ephemeral loopback port, and held in a run-id -> port
-map that the gateway resolves per request.
+One :class:`PreviewSession` per run. The app is copied to its own directory and
+booted, and held in a run-id -> port map that the gateway resolves per request.
+**The gateway contract does not change**: ``PreviewSession.port`` stays an
+``int`` and the gateway still proxies to ``127.0.0.1:<port>``. Only the
+provenance of that port changes between the two transports below.
 
-What this is **not**: isolation. The child is a normal process on this host
-with this host's filesystem, network and CPU. Three things are done about the
-obvious foot-guns, and the docs say plainly that they are mitigations rather
-than a sandbox:
+``container`` (default)
+    A container from the sandbox image, with the same containment the test loop
+    uses: read-only filesystem, no capabilities, non-root uid, a pids limit,
+    memory and CPU ceilings, and a network with ``internal: true`` so there is
+    no route to the internet. The port is assigned by Docker and read back with
+    ``docker inspect``, which also deletes the bind-then-close race a
+    ``_free_port()`` helper necessarily has.
 
-* every platform credential is stripped from the child environment
-  (:data:`STRIPPED_ENV`); generated code and platform keys never share a process
-* the server binds ``127.0.0.1``, so nothing outside the host can reach it and
-  only the authenticated gateway can proxy to it
-* a TTL reaper and a concurrency cap bound how long and how many
+``subprocess``
+    A plain child process on the host with the platform's filesystem and
+    network. It exists so the project can be developed and tested without a
+    container engine, and it is off in every deployed profile. It is **not**
+    isolation, and the docs say so plainly.
 
-Anyone running this on a machine they care about should put a real sandbox
-(Docker, a VM, gVisor) in front of it.
+Either way three things are done about the obvious foot-guns: every platform
+credential is stripped from the child environment
+(:data:`STRIPPED_ENV`); the server binds ``127.0.0.1`` so only the
+authenticated gateway can reach it; and a TTL reaper plus a concurrency cap
+bound how long and how many.
 """
 
 from __future__ import annotations
@@ -25,6 +33,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -32,14 +41,19 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from app.config import Settings, get_settings
+from sandbox import docker as Docker
+from sandbox import runner as Runner
+from sandbox.flags import SandboxLimits, run_argv
 
 log = logging.getLogger("app.playground")
+
 
 #: Never inherited by the generated app. These are the platform's own
 #: credentials: handing them to generated code would let a bad generation (or a
@@ -63,7 +77,72 @@ STRIPPED_ENV = (
 #: Server must not announce its version to a page served inside our own iframe.
 _UVICORN_ARGS = ("--log-level", "warning", "--no-access-log")
 
+#: Health-probe schedule: start tight, back off to a quarter second. See
+#: ``PlaygroundService._await_health``.
+_PROBE_START_INTERVAL = 0.05
+_PROBE_MAX_INTERVAL = 0.25
+
+#: The port the app listens on *inside* the container. Fixed, because the
+#: container's network namespace is its own; the port the host publishes is
+#: assigned by Docker and read back from inspect.
+_CONTAINER_PORT = 8000
+
 IDLE_STATES = ("stopped", "crashed")
+
+#: One requirement line: an optional name, an optional extras group, an optional
+#: version specifier and an optional environment marker. Deliberately not a full
+#: PEP 508 parser -- ``packaging`` is not a declared dependency, and the only
+#: decision this feeds is "is it worth spawning pip", where an unparseable line
+#: is simply treated as unsatisfied.
+_REQUIREMENT = re.compile(
+    r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(?:[<>=!~].*)?(?:;.*)?$"
+)
+
+
+def parse_requirements(text: str) -> set[str]:
+    """Distribution names declared in a requirements file, PEP 503 normalised.
+
+    Comments, flags (``-r``, ``--index-url``), editables and bare URLs are
+    dropped rather than guessed at: they cannot be checked against what is
+    installed, so the caller treats the result as unsatisfied and runs pip.
+    """
+    names: set[str] = set()
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        m = _REQUIREMENT.match(line)
+        if m:
+            names.add(_normalise_dist(m.group(1)))
+    return names
+
+
+def _normalise_dist(name: str) -> str:
+    """``Foo_Bar`` and ``foo-bar`` are the same distribution."""
+    return name.strip().lower().replace("_", "-").replace(".", "-")
+
+
+@lru_cache(maxsize=1)
+def _installed_distributions() -> set[str]:
+    """Every distribution installed in this interpreter, normalised the same way.
+
+    Read from ``importlib.metadata`` rather than by trying to import each
+    requirement, because the name a project is distributed under is not the name
+    it imports (``pyyaml`` -> ``yaml``, ``python-multipart`` -> ``multipart``)
+    and getting that mapping wrong would install packages that are already
+    present. Cached: the first call walks every ``sys.path`` entry.
+    """
+    found: set[str] = set()
+    try:
+        from importlib.metadata import distributions
+
+        for dist in distributions():
+            name = dist.metadata["Name"] if dist.metadata else None
+            if name:
+                found.add(_normalise_dist(name))
+    except Exception as exc:  # a broken metadata dir must not block a preview
+        log.warning("could not enumerate installed distributions: %s", exc)
+    return found
 
 
 def _free_port() -> int:
@@ -78,20 +157,33 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def child_env(workdir: Path) -> dict[str, str]:
-    """Environment for the generated app: platform keys removed, CWD pinned."""
+def child_env(workdir: Path, limits: SandboxLimits | None = None) -> dict[str, str]:
+    """Environment for the generated app: platform keys removed, CWD pinned.
+
+    ``workdir`` is only honoured in subprocess mode. In container mode the code
+    is mounted read-only and the writable data directory is a tmpfs inside the
+    container, so the paths that matter are the container's, not the host's --
+    pointing ``SQLITE_PATH`` at a read-only bind mount would make every app that
+    creates a database at import fail to boot, with an error that says nothing
+    about why.
+    """
     env = {k: v for k, v in os.environ.items() if k not in STRIPPED_ENV and "API_KEY" not in k}
+    data_dir = (
+        str(workdir) if limits is None else (limits.data_mount or str(workdir))
+    )
     env.update(
         {
             # Tells generated code it is being previewed, not deployed.
             "PREVIEW": "1",
+            "SANDBOX": "1",
             "PYTHONUNBUFFERED": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
             # Any SQLite path the generated code builds from its own file name
-            # has to land here, not in the run directory the pipeline reads.
-            "PREVIEW_DIR": str(workdir),
-            "SQLITE_PATH": str(workdir / "preview.db"),
-            "DATABASE_URL": f"sqlite:///{workdir / 'preview.db'}",
+            # has to land in the writable data directory, not in the run
+            # directory the pipeline reads.
+            "PREVIEW_DIR": data_dir,
+            "SQLITE_PATH": f"{data_dir}/preview.db",
+            "DATABASE_URL": f"sqlite:///{data_dir}/preview.db",
         }
     )
     return env
@@ -99,10 +191,23 @@ def child_env(workdir: Path) -> dict[str, str]:
 
 @dataclass
 class PreviewSession:
-    """One running (or stopped) preview."""
+    """One running (or stopped) preview.
+
+    Holds both transports behind one shape: ``proc`` for the subprocess path,
+    ``container_id`` for the container path. Exactly one is set. ``port`` is an
+    ``int`` in both cases and the gateway proxies to ``127.0.0.1:<port>``
+    regardless, which is what keeps the ``/preview/<rid>/`` contract identical
+    to the one the frontend already talks to.
+    """
 
     run_id: str
     port: int
+    #: Where ``port`` is. "127.0.0.1" in subprocess mode; in container mode it
+    #: is the container's address on the internal sandbox network, because an
+    #: internal network cannot publish host ports at all. The gateway only ever
+    #: reads the pair, which is why the contract the frontend depends on is the
+    #: same in both modes.
+    host: str
     workdir: Path
     log_path: Path
     run_dir: Path
@@ -112,16 +217,62 @@ class PreviewSession:
     error: str = ""
     entry: str = ""
     proc: subprocess.Popen | None = None
+    #: Set instead of ``proc`` in container mode.
+    container_id: str | None = None
+    #: Set when the container is only reachable through the sandbox sidecar.
+    proxy_url: str | None = None
     #: Sticky: True once the app has answered a health probe at least once.
     #: ``state`` alone cannot answer "did this app ever boot?", because
     #: stopping a preview resets it to "stopped" — and an eval that reads the
     #: file afterwards must not score a successful boot as a failure.
     ever_booted: bool = False
+    #: Set the instant teardown begins, before any signal is sent.
+    #:
+    #: A session leaves the service's map before _terminate() finishes, because
+    #: waiting for a process to exit takes seconds and holding the service lock
+    #: across that would stall the API thread. Without this flag, "removed from
+    #: the map" and "the port is released" are two different instants, and
+    #: anything that observes the first and checks the second sees a process
+    #: that is on its way out still answering. Terminating is the first thing
+    #: teardown does, so it is the flag's first write.
+    terminating: bool = False
+
+    @property
+    def mode(self) -> str:
+        return "container" if self.container_id else "subprocess"
+
+    @property
+    def base_url(self) -> str:
+        """Where the gateway sends proxied requests for this preview.
+
+        Normally the container's own address. When the backend cannot reach
+        that address -- it is not on ``sandbox-net``, where the containers
+        live -- the sidecar is, so requests go through it instead. Set once at
+        spawn rather than recomputed per request: it is a property of where the
+        caller sits, not of the container's current state.
+        """
+        if self.proxy_url:
+            return self.proxy_url
+        return f"http://{self.host}:{self.port}"
 
     def alive(self) -> bool:
+        if self.terminating:
+            return False
+        if self.container_id:
+            # `docker inspect` rather than a cached flag: the whole point of
+            # the crash-restart path is to notice a container that died on its
+            # own (OOM, a review patch that broke the app).
+            return Docker.is_running(self.container_id)
         return self.proc is not None and self.proc.poll() is None
 
+
     def log_tail(self, lines: int = 40) -> str:
+        """The last ``lines`` of the app's output, from wherever it is running."""
+        if self.container_id:
+            try:
+                return "\n".join(Docker.logs(self.container_id, lines).splitlines()[-lines:])
+            except Docker.DockerUnavailable:
+                return ""
         try:
             text = self.log_path.read_text(errors="replace")
         except OSError:
@@ -136,10 +287,18 @@ class PreviewSession:
             "state": self.state,
             "url": f"/preview/{self.run_id}/" if self.state == "running" else None,
             "port": self.port if self.state == "running" else None,
+            # Diagnostic only. The client always talks to /preview/<rid>/; it
+            # never learns an internal address.
+            "host": self.host if self.state == "running" else None,
             "started_at": self.started_at or None,
             "idle_seconds": idle,
             "error": self.error or None,
             "ever_booted": self.ever_booted,
+            # Which transport actually ran it. The Playground tab must behave
+            # identically either way, so this is diagnostics, not behaviour --
+            # but "subprocess" is the single most important thing to know when
+            # reading a screenshot of a machine you do not trust.
+            "mode": self.mode,
             "log_tail": self.log_tail(),
         }
 
@@ -213,17 +372,23 @@ class PlaygroundService:
                 "state": "stopped",
                 "url": None,
                 "port": None,
+                "host": None,
                 "started_at": None,
                 "idle_seconds": 0,
                 "error": None,
                 "ever_booted": False,
+                "mode": None,
                 "log_tail": "",
             }
         # A process that died under us (a review patch rewrote its files, an
         # OOM kill) must not keep reporting "running".
         if session.state == "running" and not session.alive():
             session.state = "crashed"
-            session.error = "the preview process exited"
+            session.error = (
+                "the preview container exited"
+                if session.container_id
+                else "the preview process exited"
+            )
             session.persist()
         return session.status()
 
@@ -300,7 +465,12 @@ class PlaygroundService:
 
         session = PreviewSession(
             run_id=run_id,
-            port=_free_port(),
+            # Provisional. In container mode the real port comes back from
+            # `docker inspect` once the container is up, because Docker assigns
+            # it; in subprocess mode it is chosen here. Either way the gateway
+            # only ever reads the int.
+            port=0,
+            host="127.0.0.1",
             workdir=workdir,
             log_path=workdir / "preview.log",
             run_dir=source,
@@ -312,19 +482,37 @@ class PlaygroundService:
         with self._lock:
             self._sessions[run_id] = session
 
-        self._install_requirements(workdir)
         try:
+            if not self._install_requirements(workdir):
+                # Skipped on purpose: in container mode nothing is installed
+                # into the image at run time. A dependency outside the
+                # wheelhouse means the app cannot boot, and the boot failure
+                # says so by name rather than leaving an ImportError.
+                log.debug("preview %s: no dependency install needed", run_id)
             self._spawn(session, entry_module, entry_attr)
-        except Exception:
+        except Exception as exc:
             with self._lock:
                 self._sessions.pop(run_id, None)
-            raise
+            self._terminate(session)
+            if session.container_id or session.proc:
+                raise
+            # A failure before anything was spawned is a plain error: no
+            # engine, no image, no entry point to serve.
+            raise RuntimeError(
+                f"preview for run '{run_id}' could not start: {exc}"
+            ) from exc
 
         session.error = ""
         if self._await_health(session, source):
             session.state = "running"
             session.ever_booted = True
-            log.info("preview %s running on 127.0.0.1:%s (%s)", run_id, session.port, session.entry)
+            log.info(
+                "preview %s running at %s (%s, %s)",
+                run_id,
+                session.base_url,
+                session.entry,
+                session.mode,
+            )
         else:
             session.state = "crashed"
             detail = (
@@ -340,6 +528,8 @@ class PlaygroundService:
         """Stop a preview. False when there was nothing running."""
         with self._lock:
             session = self._sessions.pop(run_id, None)
+            if session is not None:
+                self._claim(session)
         if session is None:
             return False
         self._terminate(session)
@@ -397,17 +587,38 @@ class PlaygroundService:
             log.warning("preview entry discovery failed: %s", exc)
             return None
 
-    def _install_requirements(self, workdir: Path) -> None:
+    def _install_requirements(self, workdir: Path) -> bool:
         """Best-effort ``pip install`` of the generated app's dependencies.
 
-        Capped and never fatal: the platform venv already has FastAPI,
-        SQLAlchemy and uvicorn, so the common case needs no install at all. A
-        dependency the sandbox cannot fetch (no network) leaves the app
-        crashing on import, which the health probe then reports honestly.
+        Subprocess mode only. A container cannot install anything -- it has no
+        route to PyPI and its image is fixed -- so in container mode a missing
+        dependency is a wheelhouse problem, reported by name when the app fails
+        to boot, not something to paper over with a failing subprocess here.
+
+        Capped and never fatal in either mode: the interpreter already has
+        FastAPI, SQLAlchemy and uvicorn, so the common case needs no install at
+        all. The measured cost of *not* checking was 0.52 s plus a subprocess on
+        every preview start, for requirements that were already satisfied.
         """
         req = workdir / "requirements.txt"
-        if not req.is_file() or not req.read_text(errors="replace").strip():
-            return
+        if not req.is_file():
+            return False
+        wanted = parse_requirements(req.read_text(errors="replace"))
+        if not wanted:
+            return False
+        if wanted <= _installed_distributions():
+            log.debug("preview %s: all %d requirements already satisfied", workdir.name, len(wanted))
+            return False
+        if Runner.uses_docker():
+            # Named, not installed. A user watching a preview crash on an
+            # ImportError deserves to be told which line to add.
+            missing = ", ".join(f"`{d}`" for d in sorted(wanted - _installed_distributions())[:6])
+            log.info(
+                "preview %s needs %s, which is not in the sandbox wheelhouse",
+                workdir.name,
+                missing,
+            )
+            return False
         try:
             subprocess.run(
                 [sys.executable, "-m", "pip", "install", "--quiet", "-r", str(req)],
@@ -417,11 +628,81 @@ class PlaygroundService:
                 timeout=60,
                 check=False,
             )
+            return True
         except Exception as exc:
             log.info("preview dependency install skipped: %s", exc)
+            return False
 
     def _spawn(self, session: PreviewSession, module: str, attr: str) -> None:
         session.entry = f"{module}:{attr}"
+        if Runner.uses_docker():
+            self._spawn_container(session, module, attr)
+        else:
+            self._spawn_subprocess(session, module, attr)
+
+    def _spawn_container(self, session: PreviewSession, module: str, attr: str) -> None:
+        """Start the preview in a sandbox container and adopt Docker's address.
+
+        Nothing is chosen beforehand. On the deployed internal network the app
+        is reached at the container's own address, and on a development bridge
+        network at a host port Docker assigns and reports through ``inspect``.
+        Either way there is no window between picking a number and binding it --
+        which is the entire reason ``_free_port()`` existed, with its
+        bind/close/rebind race.
+        """
+        limits = SandboxLimits.from_env()
+        Docker.ensure_network(limits.network)
+        image = Docker.ensure_image(limits.image)
+        # The workdir is mounted read-only like every other sandbox mount, so
+        # the writable state -- a SQLite file, uploaded artefacts -- goes to the
+        # /data tmpfs instead. That is why the child env below points there.
+        #
+        # Behind the sidecar the runs volume is mounted *by name* and the workdir
+        # set inside it. A host path here is a path that exists only inside this
+        # container, and the daemon resolves `-v` sources on the host -- so it
+        # would create an empty directory there and the preview would start
+        # uvicorn against a directory with no `main.py` in it. That presents as
+        # "the app did not answer on /health", which is exactly what it looks
+        # like when a generated app is simply broken.
+        volume = Runner._runs_volume() if Runner.uses_docker() else None
+        inside = None
+        if volume:
+            root = Runner._mount_root()
+            if root and root in session.workdir.parents:
+                rel = session.workdir.relative_to(root)
+                inside = f"{limits.workdir}/{rel.as_posix()}"
+        argv = run_argv(
+            image,
+            [
+                "-m",
+                "uvicorn",
+                f"{module}:{attr}",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                str(_CONTAINER_PORT),
+                *_UVICORN_ARGS,
+            ],
+            limits=limits,
+            mount=None if volume else str(session.workdir),
+            mount_volume=volume if inside else None,
+            workdir=inside,
+            env=child_env(session.workdir, limits=limits),
+            entrypoint="python",
+            detach=True,
+            with_data=True,
+        )
+        session.container_id = Docker.start_detached(argv)
+        session.host, session.port = Docker.reachable_address(
+            session.container_id, limits.network, _CONTAINER_PORT
+        )
+        # The backend is not on sandbox-net, so that address has no route from
+        # here; the sidecar is on both networks and relays.
+        session.proxy_url = Docker.preview_base_url(session.container_id)
+        log.debug("preview container %s reachable at %s", session.container_id, session.base_url)
+
+    def _spawn_subprocess(self, session: PreviewSession, module: str, attr: str) -> None:
+        session.port = _free_port()
         logfile = session.log_path.open("w")
         session.proc = subprocess.Popen(
             [
@@ -451,26 +732,43 @@ class PlaygroundService:
         budget: a generated app routinely answers on ``/`` while the spec's
         first declared path 404s, and spending the entire timeout on that one
         path would report a healthy app as crashed.
+
+        The interval grows from 50 ms. A flat 250 ms made every boot pay a
+        quarter-second floor on its first probe even when uvicorn was answering
+        within a few milliseconds; the ceiling is unchanged, so a genuinely
+        slow app still gets the full timeout.
         """
         candidates = _probe_paths(source)
         deadline = time.time() + max(5, self.settings.preview_boot_timeout_seconds)
+        delay = _PROBE_START_INTERVAL
         while time.time() < deadline:
             if not session.alive():
                 return False
             for candidate in candidates:
-                url = f"http://127.0.0.1:{session.port}{candidate}"
+                url = f"{session.base_url}{candidate}"
                 try:
                     if httpx.get(url, timeout=2.0, follow_redirects=False).status_code == 200:
                         return True
                 except Exception:
                     continue
-            time.sleep(0.25)
+            time.sleep(delay)
+            delay = min(delay * 2, _PROBE_MAX_INTERVAL)
         return False
 
+    def _claim(self, session: PreviewSession) -> None:
+        """Mark a session as being torn down. Caller holds ``self._lock``."""
+        session.terminating = True
+
     def _terminate(self, session: PreviewSession) -> None:
-        proc = session.proc
+        # First statement, before the state changes: see PreviewSession.terminating.
+        session.terminating = True
         session.state = "stopped"
-        session.proc = None
+        if session.container_id:
+            container_id, session.container_id = session.container_id, None
+            session.proc = None
+            Docker.stop_container(container_id)
+            return
+        proc, session.proc = session.proc, None
         if proc is None or proc.poll() is not None:
             return
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
@@ -505,6 +803,12 @@ class PlaygroundService:
             ]
             for session in expired:
                 self._sessions.pop(session.run_id, None)
+                # Claimed under the same lock that removed it, so "no longer in
+                # the map" and "no longer alive" are one instant. Claiming
+                # afterwards leaves a window in which a caller that just saw the
+                # map empty still sees a running process -- which is the race a
+                # TTL test, or a gateway request, can lose.
+                self._claim(session)
         for session in expired:
             log.info("preview %s expired (idle or stopped)", session.run_id)
             self._terminate(session)

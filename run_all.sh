@@ -67,7 +67,7 @@ if [ ! -x .venv/bin/python ]; then
   echo "No .venv found. Creating one..."
   python3 -m venv .venv || { echo "venv creation failed"; exit 1; }
   .venv/bin/python -m pip install -q --upgrade pip
-  .venv/bin/python -m pip install -q -r backend/requirements.txt || {
+  .venv/bin/python -m pip install -q -r backend/requirements-dev.txt || {
     echo "dependency install failed"; exit 1; }
   echo "Dependencies installed."
 fi

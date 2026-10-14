@@ -535,7 +535,7 @@ def test_openai_compat_returns_the_answer_and_captures_the_reasoning(monkeypatch
             ]
         },
     )
-    llm._LAST_REASONING.clear()
+    llm._CALL.reasoning.clear()
     text = llm._openai_compat(
         "https://api.groq.com/openai/v1/chat/completions",
         "key",
@@ -546,7 +546,7 @@ def test_openai_compat_returns_the_answer_and_captures_the_reasoning(monkeypatch
         reasoning_body={"include_reasoning": True},
     )
     assert text == "the answer"
-    assert llm._LAST_REASONING == ["step by step I decided"]
+    assert llm._CALL.reasoning == ["step by step I decided"]
 
 
 def test_openai_compat_strips_raw_format_thinking_from_the_answer(monkeypatch):
@@ -563,7 +563,7 @@ def test_openai_compat_strips_raw_format_thinking_from_the_answer(monkeypatch):
             ]
         },
     )
-    llm._LAST_REASONING.clear()
+    llm._CALL.reasoning.clear()
     text = llm._openai_compat(
         "https://api.groq.com/openai/v1/chat/completions",
         "key",
@@ -574,7 +574,7 @@ def test_openai_compat_strips_raw_format_thinking_from_the_answer(monkeypatch):
         reasoning_body={"reasoning_format": "raw"},
     )
     assert text == "\nthe answer"
-    assert llm._LAST_REASONING == ["<thinking>hmm</thinking>"]
+    assert llm._CALL.reasoning == ["<thinking>hmm</thinking>"]
 
 
 def test_reasoning_model_reports_why_the_content_came_back_empty(monkeypatch):
@@ -588,8 +588,8 @@ def test_reasoning_model_reports_why_the_content_came_back_empty(monkeypatch):
             ]
         },
     )
-    llm._LAST_REASONING.clear()
-    llm._FAILURES.clear()
+    llm._CALL.reasoning.clear()
+    llm._CALL.failures.clear()
     text = llm._openai_compat(
         "https://api.groq.com/openai/v1/chat/completions",
         "key",
@@ -600,8 +600,8 @@ def test_reasoning_model_reports_why_the_content_came_back_empty(monkeypatch):
         reasoning_body={"include_reasoning": True},
     )
     assert text is None
-    assert not llm._LAST_REASONING, "a failed attempt must not leave its thinking behind"
-    assert any("reasoning consumed the budget" in f for f in llm._FAILURES)
+    assert not llm._CALL.reasoning, "a failed attempt must not leave its thinking behind"
+    assert any("reasoning consumed the budget" in f for f in llm._CALL.failures)
 
 
 def test_gemini_thinking_parts_never_reach_the_answer():
@@ -627,8 +627,8 @@ def test_gemini_sends_a_thinking_config_only_when_the_role_asks(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.delenv("GEMINI_MODEL", raising=False)
     monkeypatch.setenv("GEMINI_MODELS", "gemini-3-flash-preview")
-    llm._LAST_MODEL.clear()
-    llm._LAST_REASONING.clear()
+    llm._CALL.model.clear()
+    llm._CALL.reasoning.clear()
     seen = {}
 
     def fake_post(url, payload, headers=None, timeout=60):
@@ -637,18 +637,19 @@ def test_gemini_sends_a_thinking_config_only_when_the_role_asks(monkeypatch):
 
     monkeypatch.setattr(llm, "_post_json", fake_post)
 
-    # Reasoning off for this role: no thinkingConfig, untouched token ceiling.
+    # Reasoning off for this role: no thinkingConfig, and the ceiling comes
+    # from the role's own budget rather than a hardcoded 8192.
     monkeypatch.setenv("LLM_REASONING_ROLES", "reviewer")
     assert llm._gemini("p", "s", 30, role="pm") == "ok"
     assert "thinkingConfig" not in seen
-    assert seen["maxOutputTokens"] == 8192
+    assert seen["maxOutputTokens"] == llm.role_num_predict("pm")
 
     # Reasoning on: thinkingConfig present and the ceiling grows by the budget.
     monkeypatch.setenv("LLM_REASONING_ROLES", "pm")
     monkeypatch.setenv("LLM_REASONING_BUDGET", "2048")
     assert llm._gemini("p", "s", 30, role="pm") == "ok"
     assert seen["thinkingConfig"] == {"includeThoughts": True, "thinkingBudget": 2048}
-    assert seen["maxOutputTokens"] == 8192 + 2048
+    assert seen["maxOutputTokens"] == llm.role_num_predict("pm") + 2048
 
 
 def test_generate_surfaces_reasoning_in_meta_and_log(monkeypatch):

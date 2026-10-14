@@ -1,0 +1,13 @@
+{
+  "run_id": "verify_library_e2e",
+  "state": "stopped",
+  "url": null,
+  "port": null,
+  "host": null,
+  "started_at": 1791939294.0079448,
+  "idle_seconds": 0,
+  "error": null,
+  "ever_booted": true,
+  "mode": "subprocess",
+  "log_tail": ""
+}

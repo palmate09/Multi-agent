@@ -1,0 +1,14 @@
+{
+  "comments": [
+    {
+      "severity": "major",
+      "message": "Loans endpoint does not validate that the book exists.",
+      "location": "app.py:88"
+    },
+    {
+      "severity": "minor",
+      "message": "Inconsistent quoting in the generated OpenAPI block.",
+      "location": "spec.yaml:12"
+    }
+  ]
+}

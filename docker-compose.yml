@@ -30,7 +30,11 @@ services:
       LLM_PROVIDER: "${LLM_PROVIDER:-gemini}"
       LLM_TIMEOUT: "${LLM_TIMEOUT:-120}"
       GEMINI_MODELS: "${GEMINI_MODELS:-gemini-3-flash-preview,gemini-flash-latest,gemini-3.8-flash}"
-      GEMINI_MAX_OUTPUT_TOKENS: "${GEMINI_MAX_OUTPUT_TOKENS:-8192}"
+      # Empty = per-role ceilings from agents/llm.py (triage 500, reflection
+      # 800, developer 8000). Setting it restores one flat ceiling for every
+      # role, which is the latency defect Phase 1 removed. Raise per role with
+      # LLM_MAX_TOKENS_<ROLE> instead.
+      GEMINI_MAX_OUTPUT_TOKENS: "${GEMINI_MAX_OUTPUT_TOKENS:-}"
       OLLAMA_MODEL_PM: "${OLLAMA_MODEL_PM:-qwen2.5-coder:3b}"
       OLLAMA_MODEL_DESIGNER: "${OLLAMA_MODEL_DESIGNER:-qwen2.5-coder:7b-instruct-q4_K_M}"
       OLLAMA_MODEL_DEVELOPER: "${OLLAMA_MODEL_DEVELOPER:-qwen2.5-coder:3b}"
@@ -56,7 +60,22 @@ services:
       # CPU inference is slow: two concurrent runs saturate 4 cores.
       MAX_CONCURRENT_RUNS: "${MAX_CONCURRENT_RUNS:-2}"
       RUN_TIMEOUT_SECONDS: "${RUN_TIMEOUT_SECONDS:-1800}"
-      SANDBOX_USE_DOCKER: "false"
+      # ---- sandbox ----
+      # `container` executes generated code with the containment the deployed
+      # profile uses. Set SANDBOX_MODE=subprocess to run it as a plain child of
+      # this process instead -- no Docker required, and no isolation at all.
+      SANDBOX_MODE: "${SANDBOX_MODE:-container}"
+      SANDBOX_API_URL: "http://sandbox:8001"
+      # The daemon resolves `-v` sources on the host, so the bundle path --
+      # which exists only inside this container's mount -- cannot be passed
+      # through or the sandbox mounts an empty host directory and collects no
+      # tests. Naming the volume works from any container holding the socket.
+      RUNS_VOLUME: runs-data
+      SANDBOX_NETWORK: sandbox-net
+      SANDBOX_MAX_CONCURRENT: "${SANDBOX_MAX_CONCURRENT:-4}"
+      # Off unless the db profile is running; the filesystem remains the
+      # artifact store either way, so this is an index and never a dependency.
+      DATABASE_URL: "${DEV_DATABASE_URL:-}"
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
       GROQ_API_KEY: "${GROQ_API_KEY:-}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
@@ -68,6 +87,12 @@ services:
       - runs-data:/data/runs
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      sandbox:
+        condition: service_healthy
+    # `default` for the Vite proxy and the hosted LLM endpoints, `inner` so the
+    # backend<->sidecar path is the same one production uses.
+    networks: [default, inner]
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
       interval: 15s
@@ -92,6 +117,94 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # The only service with a Docker socket. See deploy/docker-compose.prod.yml
+  # for why the socket is not simply mounted into the backend.
+  sandbox:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command:
+      - uvicorn
+      - sandbox.sidecar:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+      - --no-access-log
+    environment:
+      HOME: /tmp
+      SANDBOX_MOUNT_ROOT: /data/runs
+      SANDBOX_IMAGE_ALLOWLIST: agent-team-sandbox
+      SANDBOX_NETWORK: sandbox-net
+      SANDBOX_IMAGE: "${SANDBOX_IMAGE:-agent-team-sandbox:local}"
+      SANDBOX_MAX_CONCURRENT: "${SANDBOX_MAX_CONCURRENT:-4}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - runs-data:/data/runs:ro
+      # Live source, so `docker build` here picks up sandbox/ edits without a
+      # separate image rebuild step in the dev loop.
+      - ./backend:/app
+    # docker.sock is root:<docker-gid> mode 660 and this service is uid 10001,
+    # so without a supplementary group it is refused a socket it was explicitly
+    # given -- `engine: false`, and every request fails. The GID is
+    # host-specific (999 on some distributions, 1001 here), so start.sh exports
+    # DOCKER_GID read off the socket itself; the default keeps a bare
+    # `docker compose up` working on a host that uses the common 1001.
+    group_add:
+      - "${DOCKER_GID:-1001}"
+    healthcheck:
+      # Must assert the engine, not just liveness: the sidecar can be alive
+      # with a dead socket, and a liveness-only check lets compose wire the
+      # backend to a service that cannot start anything.
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8001/health | grep -q 'engine.*true'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    # `default` so `docker build` can pull base images; `inner` so the backend
+    # reaches it on the same network production uses; `sandbox-net` because the
+    # sidecar is the only component that can be on the untrusted network -- it
+    # has to be, to reach the containers it starts.
+    #
+    # The backend is deliberately NOT on `sandbox-net`. That is what keeps the
+    # platform's own API out of reach of model-generated code, and it is why
+    # preview traffic is relayed through the sidecar rather than dialled
+    # directly: the sidecar spans both networks and the backend spans neither.
+    networks: [default, inner, sandbox-net]
+    restart: unless-stopped
+
+  # Optional Postgres for the dev stack. Behind a profile so `docker compose up`
+  # still works on a machine without it; the filesystem is the artifact store
+  # regardless, so nothing breaks when it is absent.
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["db"]
+    environment:
+      POSTGRES_USER: mat
+      POSTGRES_PASSWORD: mat
+      POSTGRES_DB: mat
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [inner]
+    restart: unless-stopped
+
+networks:
+  # Generated code runs here. `internal: true` means no route off the host:
+  # sandboxed code cannot exfiltrate, and can still reach the sidecar.
+  inner:
+    driver: bridge
+    internal: true
+
+  # Declared here rather than created on demand by the runner, because compose
+  # has to attach a service to it -- and the one service that must be on it is
+  # the sidecar. `internal: true` matches what `sandbox/docker.ensure_network`
+  # would have created, so whichever gets there first, the answer is the same.
+  sandbox-net:
+    name: sandbox-net
+    driver: bridge
+    internal: true
+
 volumes:
   runs-data:
   frontend-modules:
+  pgdata:

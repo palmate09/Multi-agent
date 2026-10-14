@@ -1,100 +1,156 @@
-import { useState } from "react";
+import { useState } from 'react';
+
+import { Alert } from './ui/Alert';
+import { Button } from './ui/Button';
+import { Card } from './ui/Card';
+import { Checkbox, Textarea } from './ui/Field';
 
 const EXAMPLES = [
-  "Build a REST API for managing tasks with SQLite persistence. Endpoints: GET /health, CRUD /tasks with title validation (422 on empty), 404 on unknown id.",
-  "Build a task manager REST API with CRUD /tasks plus GET /tasks?done=true filter. Same validation (422/404) and /health.",
-  "Build a task manager REST API with CRUD /tasks plus a notes field on tasks. Same validation (422/404) and /health.",
+  'Build a REST API for managing tasks with SQLite persistence. Endpoints: GET /health, CRUD /tasks with title validation (422 on empty), 404 on unknown id.',
+  'Build a task manager REST API with CRUD /tasks plus GET /tasks?done=true filter. Same validation (422/404) and /health.',
+  'Build a task manager REST API with CRUD /tasks plus a notes field on tasks. Same validation (422/404) and /health.',
 ];
+
+/** The backend rejects anything shorter; matching it here means the user is
+ *  told before a round trip, not after one. */
+const MIN_CHARS = 10;
 
 interface Props {
   onSubmit: (
-    requirement: string,
-    opts: { skipTester: boolean; skipReviewer: boolean; skipReasoner: boolean; ui: boolean }
+    _requirement: string,
+    _opts: { skipTester: boolean; skipReviewer: boolean; skipReasoner: boolean; ui: boolean }
   ) => void;
   busy: boolean;
   error: string | null;
+  /** Shown on the error alert, so a failed start can be repeated. */
+  onRetry?: () => void;
+  onDismissError?: () => void;
 }
 
-export function RequirementForm({ onSubmit, busy, error }: Props) {
+export function RequirementForm({ onSubmit, busy, error, onRetry, onDismissError }: Props) {
   const [text, setText] = useState(EXAMPLES[0]);
   const [skipTester, setSkipTester] = useState(false);
   const [skipReviewer, setSkipReviewer] = useState(false);
   const [skipReasoner, setSkipReasoner] = useState(false);
   const [ui, setUi] = useState(false);
+  // Only after a submit: complaining about a half-typed requirement while
+  // someone is still writing it is noise, not validation.
+  const [touched, setTouched] = useState(false);
 
-  const valid = text.trim().length >= 10;
+  const trimmed = text.trim();
+  const valid = trimmed.length >= MIN_CHARS;
+  const validation =
+    touched && !valid ? `Describe the API in at least ${MIN_CHARS} characters.` : null;
 
   return (
-    <div className="card">
+    <Card label="New run">
       <h2>New run</h2>
-      <div className="field">
-        <label htmlFor="req">Requirement</label>
-        <textarea
-          id="req"
-          rows={4}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="Describe the API you want in plain English…"
-        />
-      </div>
-      <div className="field row" style={{ gap: 16 }}>
-        <label className="check">
-          <input
-            type="checkbox"
+
+      <Textarea
+        label="Requirement"
+        rows={4}
+        value={text}
+        onChange={e => setText(e.target.value)}
+        onBlur={() => setTouched(true)}
+        placeholder="Describe the API you want in plain English…"
+        error={validation}
+        hint={
+          validation ? undefined : `${trimmed.length} characters · describe the endpoints you want`
+        }
+        required
+      />
+
+      {/* One control with four settings, so it is a fieldset. "Ablate" is
+          jargon; each checkbox says what it does to the run. */}
+      <fieldset className="ablate">
+        <legend>Pipeline options</legend>
+        <div className="check-grid">
+          <Checkbox
+            label="Skip the reasoner"
+            hint="No plan tab; design starts from the stories alone."
             checked={skipReasoner}
-            onChange={(e) => setSkipReasoner(e.target.checked)}
+            disabled={busy}
+            onChange={e => setSkipReasoner(e.target.checked)}
           />
-          Ablate reasoner
-        </label>
-        <label className="check">
-          <input
-            type="checkbox"
+          <Checkbox
+            label="Skip the tester"
+            hint="No generated tests, so nothing is graded green."
             checked={skipTester}
-            onChange={(e) => setSkipTester(e.target.checked)}
+            disabled={busy}
+            onChange={e => setSkipTester(e.target.checked)}
           />
-          Ablate tester
-        </label>
-        <label className="check">
-          <input
-            type="checkbox"
+          <Checkbox
+            label="Skip the reviewer"
+            hint="No ruff/bandit pass; runs end accepted_no_review."
             checked={skipReviewer}
-            onChange={(e) => setSkipReviewer(e.target.checked)}
+            disabled={busy}
+            onChange={e => setSkipReviewer(e.target.checked)}
           />
-          Ablate reviewer
-        </label>
-        <label className="check" title="Also generate a static web UI bound to the API">
-          <input type="checkbox" checked={ui} onChange={(e) => setUi(e.target.checked)} />
-          Generate a web UI
-        </label>
-      </div>
-      {error && <div className="alert error">{error}</div>}
+          <Checkbox
+            label="Generate a web UI"
+            hint="Adds a static page bound to the generated API."
+            checked={ui}
+            disabled={busy}
+            onChange={e => setUi(e.target.checked)}
+          />
+        </div>
+      </fieldset>
+
+      {error && (
+        <Alert tone="error">
+          {error}
+          {onRetry && (
+            <div className="retry">
+              <Button size="sm" onClick={onRetry}>
+                Try again
+              </Button>
+            </div>
+          )}
+          {onDismissError && (
+            <div className="retry">
+              <Button size="sm" variant="ghost" onClick={onDismissError}>
+                Dismiss
+              </Button>
+            </div>
+          )}
+        </Alert>
+      )}
+
       <div className="row">
-        <button
-          className="primary"
+        <Button
+          variant="primary"
           disabled={!valid || busy}
-          onClick={() => onSubmit(text.trim(), { skipTester, skipReviewer, skipReasoner, ui })}
+          loading={busy}
+          loadingLabel="Starting…"
+          onClick={() => {
+            setTouched(true);
+            if (valid && !busy) onSubmit(trimmed, { skipTester, skipReviewer, skipReasoner, ui });
+          }}
         >
-          {busy ? "Starting…" : "Run pipeline"}
-        </button>
+          Run pipeline
+        </Button>
         <span className="hint">
-          {text.trim().length < 10
-            ? "At least 10 characters required."
-            : `${text.trim().length} characters`}
+          {valid ? `${trimmed.length} characters` : `At least ${MIN_CHARS} characters required.`}
         </span>
       </div>
-      <div style={{ marginTop: 10 }}>
-        <span className="hint">Examples: </span>
+
+      <div className="row examples" role="group" aria-label="Example requirements">
+        <span className="hint">Examples:</span>
         {EXAMPLES.map((ex, i) => (
-          <button
+          <Button
             key={i}
-            className="ghost"
-            style={{ fontSize: 12 }}
-            onClick={() => setText(ex)}
+            size="sm"
+            variant="ghost"
+            disabled={busy}
+            onClick={() => {
+              setText(ex);
+              setTouched(false);
+            }}
           >
-            #{i + 1}
-          </button>
+            Example {i + 1}
+          </Button>
         ))}
       </div>
-    </div>
+    </Card>
   );
 }

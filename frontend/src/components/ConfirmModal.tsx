@@ -1,48 +1,33 @@
-import { useEffect } from "react";
+import type { ReactNode } from 'react';
+
+import { Modal } from './ui/Modal';
 
 interface Props {
   title: string;
-  body: React.ReactNode;
+  body: ReactNode;
   confirmLabel: string;
   busy: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
 
-/** Destructive-action gate: backdrop click and Escape both cancel. */
+/**
+ * Destructive-action gate. A thin wrapper over the shared Modal so that every
+ * confirmation in the app gets the same focus handling, the same Escape and
+ * backdrop behaviour, and the same busy state that blocks double-firing.
+ */
 export function ConfirmModal({ title, body, confirmLabel, busy, onConfirm, onCancel }: Props) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onCancel]);
-
   return (
-    <div
-      className="modal-backdrop"
-      onClick={onCancel}
-      role="presentation"
+    <Modal
+      open
+      title={title}
+      confirmLabel={confirmLabel}
+      busy={busy}
+      confirmVariant="danger"
+      onConfirm={onConfirm}
+      onCancel={onCancel}
     >
-      <div
-        className="card modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h2>{title}</h2>
-        <div>{body}</div>
-        <div className="modal-actions">
-          <button className="ghost" disabled={busy} onClick={onCancel}>
-            Cancel
-          </button>
-          <button className="danger" disabled={busy} onClick={onConfirm}>
-            {busy ? "Working…" : confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
+      {body}
+    </Modal>
   );
 }

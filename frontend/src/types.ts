@@ -1,20 +1,20 @@
-export type Severity = "blocker" | "major" | "minor";
+export type Severity = 'blocker' | 'major' | 'minor';
 
 export type PipelineNode =
-  | "pipeline"
-  | "pm"
-  | "reasoner"
-  | "designer"
-  | "developer"
-  | "coverage"
-  | "tester"
-  | "runner"
-  | "triage"
-  | "ui_designer"
-  | "ui_developer"
-  | "ui_gate"
-  | "reviewer"
-  | "final";
+  | 'pipeline'
+  | 'pm'
+  | 'reasoner'
+  | 'designer'
+  | 'developer'
+  | 'coverage'
+  | 'tester'
+  | 'runner'
+  | 'triage'
+  | 'ui_designer'
+  | 'ui_developer'
+  | 'ui_gate'
+  | 'reviewer'
+  | 'final';
 
 export interface PipelineEvent {
   seq: number;
@@ -105,7 +105,7 @@ export interface UiReport {
   probed: string[];
 }
 
-export type PreviewState = "stopped" | "starting" | "running" | "crashed";
+export type PreviewState = 'stopped' | 'starting' | 'running' | 'crashed';
 
 export interface PreviewStatus {
   run_id: string;
@@ -155,7 +155,7 @@ export interface LlmStatus {
 }
 
 export interface Health {
-  status: "ok" | "degraded";
+  status: 'ok' | 'degraded';
   version: string;
   environment: string;
   llm: LlmStatus;
@@ -183,55 +183,54 @@ export interface EvalResults {
 }
 
 export const NODE_LABELS: Record<PipelineNode, string> = {
-  pipeline: "Pipeline",
-  pm: "PM",
-  reasoner: "Reasoner",
-  designer: "Designer",
-  developer: "Developer",
-  coverage: "Domain check",
-  tester: "Tester",
-  runner: "Sandbox",
-  triage: "Triage",
-  ui_designer: "UI design",
-  ui_developer: "UI build",
-  ui_gate: "UI gate",
-  reviewer: "Reviewer",
-  final: "Final",
+  pipeline: 'Pipeline',
+  pm: 'PM',
+  reasoner: 'Reasoner',
+  designer: 'Designer',
+  developer: 'Developer',
+  coverage: 'Domain check',
+  tester: 'Tester',
+  runner: 'Sandbox',
+  triage: 'Triage',
+  ui_designer: 'UI design',
+  ui_developer: 'UI build',
+  ui_gate: 'UI gate',
+  reviewer: 'Reviewer',
+  final: 'Final',
 };
 
 export const NODE_ORDER: PipelineNode[] = [
-  "pm",
-  "reasoner",
-  "designer",
-  "developer",
-  "coverage",
-  "tester",
-  "runner",
-  "triage",
-  "ui_designer",
-  "ui_developer",
-  "ui_gate",
-  "reviewer",
-  "final",
+  'pm',
+  'reasoner',
+  'designer',
+  'developer',
+  'coverage',
+  'tester',
+  'runner',
+  'triage',
+  'ui_designer',
+  'ui_developer',
+  'ui_gate',
+  'reviewer',
+  'final',
 ];
 
-export function statusTone(status: string): "good" | "warn" | "bad" | "idle" {
-  if (status.startsWith("accepted")) return "good";
+export function statusTone(status: string): 'good' | 'warn' | 'bad' | 'idle' {
+  if (status.startsWith('accepted')) return 'good';
   // blocked = an agent produced nothing; domain_missed = it answered a different
   // question. Both are failures the old design could not report.
   if (
-    status === "failed" ||
-    status === "unresolved" ||
-    status === "unresolved_review" ||
-    status === "blocked" ||
-    status === "domain_missed"
+    status === 'failed' ||
+    status === 'unresolved' ||
+    status === 'unresolved_review' ||
+    status === 'blocked' ||
+    status === 'domain_missed'
   )
-    return "bad";
-  if (status === "running" || status === "queued" || status === "tests_green")
-    return "warn";
+    return 'bad';
+  if (status === 'running' || status === 'queued' || status === 'tests_green') return 'warn';
   // stopping = stop requested, worker draining to cancelled. cancelled = user
   // stopped the run; neutral tone, it is neither success nor failure.
-  if (status === "stopping") return "warn";
-  if (status === "cancelled") return "idle";
-  return "idle";
+  if (status === 'stopping') return 'warn';
+  if (status === 'cancelled') return 'idle';
+  return 'idle';
 }

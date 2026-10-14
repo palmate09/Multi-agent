@@ -34,6 +34,7 @@ import json
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from agents import designer as Designer
@@ -657,8 +658,19 @@ def run_team(
             st.status = "tests_green"
             break
 
-        verdict_txt = PM.triage(st.report)
-        refl = Developer.reflect(st.report, kind=st.spec.kind)
+        # triage and reflection read the same TestReport and never touch each
+        # other's output, so they are the one genuinely independent pair in the
+        # pipeline and the only place concurrency buys anything: together they
+        # are two full LLM round trips on every failed fix-loop iteration.
+        # Both swallow GenerationError and fall back to a deterministic verdict,
+        # so neither can strand the other.
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="fixloop") as pool:
+            verdict_call = pool.submit(llm.thread_call(PM.triage, st.report))
+            reflection_call = pool.submit(
+                llm.thread_call(Developer.reflect, st.report, kind=st.spec.kind)
+            )
+            verdict_txt = verdict_call.result()
+            refl = reflection_call.result()
         st.memory.append(refl)
         _save(out, "reflections.json", json.dumps(st.memory, indent=2))
         emit(

@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 from app import auth
 from app.config import get_settings
+from app.db.engine import get_db
 from app.routers import auth as auth_router
 from app.routers import evals, health, playground, runs
 from app.services.playground import get_playground
@@ -56,6 +57,21 @@ async def lifespan(app: FastAPI):
     configure_logging("DEBUG" if settings.debug else "INFO")
     auth.reset_auth_config()
     cfg = auth.get_auth_config()
+
+    # Apply the schema before anything can query it. Without this a configured
+    # DATABASE_URL is silently worse than none: sessions and the run index both
+    # decide they are persistent, then fail their first query on a table that
+    # was never created -- so `--db` looks like it half-works and logout appears
+    # to succeed while nothing was stored. Idempotent, and a no-op when
+    # DATABASE_URL is unset, which is the whole point of the optional database.
+    db = get_db()
+    db_ready = db.init_schema() if db.configured else False
+    if db.configured and not db_ready:
+        logging.getLogger("app").error(
+            "DATABASE_URL is set but the schema could not be applied; "
+            "falling back to in-memory stores for this process"
+        )
+
     store = RunStore(settings)
     restored = store.rehydrate()
     # Created here, not lazily, so a preview process is always torn down by the
@@ -65,13 +81,14 @@ async def lifespan(app: FastAPI):
     app.state.store = store
     app.state.playground = previews
     logging.getLogger("app").info(
-        "started env=%s runs_dir=%s restored=%d auth=%s user=%s previews=%s",
+        "started env=%s runs_dir=%s restored=%d auth=%s user=%s previews=%s db=%s",
         settings.environment,
         settings.runs_dir,
         restored,
         "on" if cfg.enabled else "OFF",
         cfg.username if cfg.enabled else "-",
         "allowed" if settings.previews_enabled else "blocked",
+        "on" if db_ready else ("unreachable" if db.configured else "off"),
     )
     if not cfg.enabled:
         logging.getLogger("app").warning(

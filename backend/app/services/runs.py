@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import Settings, get_settings
+from app.db.runs import get_index
 from graph.workflow import NODES, reconstruct_state, run_team
 
 log = logging.getLogger("app.runs")
@@ -77,13 +78,37 @@ class Run:
         # boundaries. Never killed mid-call — threads cannot be safely killed.
         self.cancel_event = threading.Event()
         self.future: Any = None
+        # Durable mirror of the run row. The filesystem stays authoritative for
+        # artifacts; this is an index, and reconcile() can rebuild it from disk.
+        self.user_id: int | None = options.get("user_id")
+        self._seq = 0
 
     # -- event plumbing -------------------------------------------------
     def emit(self, node: str, phase: str, payload: dict[str, Any]) -> None:
-        event = {"seq": len(self.events), "node": node, "phase": phase, "ts": _now(), **payload}
+        event = {"seq": self._seq, "node": node, "phase": phase, "ts": _now(), **payload}
         with self._cond:
+            self._seq += 1
             self.events.append(event)
             self._cond.notify_all()
+        # Mirrored outside the lock: a slow or unavailable database must not
+        # hold up the SSE stream, which is what the UI is actually watching.
+        get_index().append_event(self.run_id, event["seq"], node, phase, payload)
+
+    def replay_from_db(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Events the in-memory buffer no longer has, read back from the table.
+
+        What a client reconnecting after a restart actually needs: the deque is
+        per-process and per-lifetime, so without this a reconnecting SSE client
+        sees an empty history and a run that was three nodes in looks like it
+        never started.
+        """
+        index = get_index()
+        if not index.enabled:
+            return []
+        with self._cond:
+            have = self._seq
+        rows = index.events(self.run_id, since_seq=have - 1, limit=limit)
+        return rows[1:] if rows else []
 
     def mark_finished(self) -> None:
         with self._cond:
@@ -290,6 +315,13 @@ class RunStore:
         run = Run(rid, requirement, self.settings.runs_dir / rid, options)
         with self._lock:
             self._runs[rid] = run
+        get_index().upsert_run(
+            rid,
+            requirement,
+            "queued",
+            options={k: v for k, v in options.items() if k != "resumed_from"},
+            user_id=run.user_id,
+        )
         return run
 
     def get(self, run_id: str) -> Run | None:
@@ -329,6 +361,10 @@ class RunStore:
         import shutil
 
         shutil.rmtree(run.run_dir, ignore_errors=True)
+        # The row cascades to run_events/run_files/preview_sessions. The
+        # directory is already gone, so leaving the row would point an index at
+        # nothing -- reconcile() would drop it, but not until the next restart.
+        get_index().delete_run(run_id)
         return True
 
     def shutdown(self) -> None:
@@ -469,6 +505,19 @@ class RunStore:
             run.updated_at = _now()
             with self._lock:
                 self._active -= 1
+            # The durable copy: status, the summary, and an inventory of what
+            # landed on disk. Best-effort throughout -- the artifacts are the
+            # record, and this is an index of them.
+            get_index().upsert_run(
+                run.run_id,
+                run.requirement,
+                run.status,
+                summary=run.summary,
+                error=run.error,
+                user_id=run.user_id,
+            )
+            if run.run_dir.is_dir():
+                get_index().index_files(run.run_id, run.run_dir)
             run.mark_finished()
 
     def rehydrate(self) -> int:
@@ -499,4 +548,25 @@ class RunStore:
                 run.mark_finished()
                 self._runs[d.name] = run
             count += 1
+        if count or get_index().enabled:
+            # The filesystem is authoritative; the index is derived. Bring the
+            # index into line with what is actually on disk rather than
+            # trusting whatever the last process wrote there.
+            try:
+                stats = get_index().reconcile(
+                    (d.name, d)
+                    for d in sorted(root.iterdir())
+                    if d.is_dir() and _SAFE_ID.match(d.name)
+                )
+                if get_index().enabled and any(stats.values()):
+                    log.info(
+                        "run index reconciled: %d indexed, %d removed, %d skipped",
+                        stats["indexed"],
+                        stats["removed"],
+                        stats["skipped"],
+                    )
+            except Exception:
+                # Reconciliation is an optimisation over the filesystem, never a
+                # precondition for serving runs.
+                log.exception("run index reconciliation failed; filesystem remains authoritative")
         return count

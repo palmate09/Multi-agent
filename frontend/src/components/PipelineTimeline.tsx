@@ -1,5 +1,7 @@
-import type { PipelineEvent, PipelineNode } from "../types";
-import { NODE_LABELS, NODE_ORDER } from "../types";
+import type { PipelineEvent, PipelineNode } from '../types';
+import { NODE_LABELS, NODE_ORDER } from '../types';
+import { formatClock } from '../lib/format';
+import { EmptyState } from './ui/Card';
 
 /** Human-readable one-liner for an event, shown next to the node name. */
 function describe(event: PipelineEvent): string {
@@ -7,69 +9,56 @@ function describe(event: PipelineEvent): string {
   const bits: string[] = [];
 
   switch (event.phase) {
-    case "start":
-      if (event.node === "pipeline") {
-        bits.push(`nodes: ${(d.nodes as string[])?.join(" → ") ?? ""}`);
-      } else if (typeof d.retry === "number") {
-        bits.push(`retry #${d.retry} (${String(d.reason ?? "retry")})`);
+    case 'start':
+      if (event.node === 'pipeline') {
+        bits.push(`nodes: ${(d.nodes as string[])?.join(' → ') ?? ''}`);
+      } else if (typeof d.retry === 'number') {
+        bits.push(`retry #${d.retry} (${String(d.reason ?? 'retry')})`);
       } else {
-        bits.push("started");
+        bits.push('started');
       }
       break;
-    case "done":
-      if (event.node === "reasoner") {
+    case 'done':
+      if (event.node === 'reasoner') {
         // The plan node: either it wrote a plan, or it was ablated on purpose.
         if (d.ablated === true) {
-          bits.push("ablated, no plan");
+          bits.push('ablated, no plan');
         } else {
-          if (typeof d.risks === "number") bits.push(`${d.risks} risks`);
-          if (typeof d.edge_cases === "number") bits.push(`${d.edge_cases} edge cases`);
-          if (typeof d.open_questions === "number") {
+          if (typeof d.risks === 'number') bits.push(`${d.risks} risks`);
+          if (typeof d.edge_cases === 'number') bits.push(`${d.edge_cases} edge cases`);
+          if (typeof d.open_questions === 'number') {
             bits.push(`${d.open_questions} open questions`);
           }
-          if (d.structured === false) bits.push("prose, not parsed");
+          if (d.structured === false) bits.push('prose, not parsed');
         }
         break;
       }
-      if (typeof d.stories === "number") bits.push(`${d.stories} stories`);
-      if (typeof d.endpoints === "number") bits.push(`${d.endpoints} endpoints`);
+      if (typeof d.stories === 'number') bits.push(`${d.stories} stories`);
+      if (typeof d.endpoints === 'number') bits.push(`${d.endpoints} endpoints`);
       if (Array.isArray(d.files)) bits.push(`${d.files.length} files`);
-      if (typeof d.passed === "number") {
+      if (typeof d.passed === 'number') {
         bits.push(`${d.passed} passed, ${d.failed} failed`);
       }
-      if (typeof d.verdict === "string") bits.push(`verdict: ${d.verdict}`);
-      if (typeof d.blockers === "number") bits.push(`${d.blockers} blockers`);
-      if (typeof d.status === "string") bits.push(`status: ${d.status}`);
-      if (typeof d.reflection === "string" && d.reflection) {
+      if (typeof d.verdict === 'string') bits.push(`verdict: ${d.verdict}`);
+      if (typeof d.blockers === 'number') bits.push(`${d.blockers} blockers`);
+      if (typeof d.status === 'string') bits.push(`status: ${d.status}`);
+      if (typeof d.reflection === 'string' && d.reflection) {
         bits.push(String(d.reflection));
       }
       if (Array.isArray(d.failures) && d.failures.length) {
         bits.push(`${(d.failures as string[]).length} failing`);
       }
       break;
-    case "progress":
-      if (typeof d.detail === "string") bits.push(String(d.detail));
+    case 'progress':
+      if (typeof d.detail === 'string') bits.push(String(d.detail));
       break;
-    case "error":
-      bits.push(String(d.error ?? "error"));
+    case 'error':
+      bits.push(String(d.error ?? 'error'));
       break;
     default:
       break;
   }
-  return bits.filter(Boolean).join(" · ");
-}
-
-function shortTime(ts: string): string {
-  try {
-    return new Date(ts).toLocaleTimeString([], {
-      hour12: false,
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-  } catch {
-    return ts;
-  }
+  return bits.filter(Boolean).join(' · ');
 }
 
 interface Props {
@@ -80,37 +69,49 @@ interface Props {
 export function PipelineTimeline({ events, running }: Props) {
   const byNode = new Map<PipelineNode, PipelineEvent[]>();
   for (const e of events) {
-    if (e.node === "pipeline" && e.phase === "end") continue;
+    if (e.node === 'pipeline' && e.phase === 'end') continue;
     const list = byNode.get(e.node) ?? [];
     list.push(e);
     byNode.set(e.node, list);
   }
 
-  const ordered = NODE_ORDER.filter((n) => byNode.has(n));
+  const ordered = NODE_ORDER.filter(n => byNode.has(n));
   // Nodes with events we don't know about (future pipeline changes).
-  const extras = [...byNode.keys()].filter((n) => !NODE_ORDER.includes(n));
+  const extras = [...byNode.keys()].filter(n => !NODE_ORDER.includes(n));
 
   if (events.length === 0) {
-    return <p className="empty">No pipeline activity yet. Start a run to see live agent steps.</p>;
+    return (
+      <EmptyState>
+        No pipeline activity yet. Start a run above to see each agent step as it happens.
+      </EmptyState>
+    );
   }
 
-  const finalEvent = events.find((e) => e.phase === "end");
+  const finalEvent = events.find(e => e.phase === 'end');
 
   return (
-    <div className="timeline">
-      {[...ordered, ...extras].map((node) => {
+    <div
+      className="timeline"
+      role="log"
+      aria-live="polite"
+      aria-relevant="additions"
+      aria-label="Pipeline progress"
+    >
+      {[...ordered, ...extras].map(node => {
         const nodeEvents = byNode.get(node) ?? [];
         const last = nodeEvents[nodeEvents.length - 1];
-        const state = last.phase === "done" ? "done" : "active";
-        const isActive = state === "active" && running;
+        const state = last.phase === 'done' ? 'done' : 'active';
+        const isActive = state === 'active' && running;
         return (
           <div key={node} className={`tl-node ${state}`}>
-            <div className="tl-icon">{isActive ? "" : state === "done" ? "✓" : "•"}</div>
+            {/* The glyph is decorative: the node name and the "done" wording
+                carry the meaning, so it is hidden from assistive tech. */}
+            <div className="tl-icon" aria-hidden="true">
+              {isActive ? '' : state === 'done' ? '✓' : '•'}
+            </div>
             <div className="tl-name">
               {NODE_LABELS[node]}
-              <div className="kv hint" style={{ marginTop: 0 }}>
-                {shortTime(last.ts)}
-              </div>
+              <div className="kv hint tl-time">{formatClock(last.ts)}</div>
             </div>
             <div className="tl-detail">
               {nodeEvents.map((e, i) => (
@@ -128,7 +129,7 @@ export function PipelineTimeline({ events, running }: Props) {
           <div className="tl-icon">✓</div>
           <div className="tl-name">Finished</div>
           <div className="tl-detail">
-            status: {String((finalEvent as Record<string, unknown>).status ?? "unknown")}
+            status: {String((finalEvent as Record<string, unknown>).status ?? 'unknown')}
           </div>
         </div>
       )}

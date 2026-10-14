@@ -1,0 +1,15 @@
+openapi: 3.1.0
+info:
+  title: Library API
+  version: 1.0.0
+paths:
+  /health:
+    get:
+      responses:
+        '200':
+          description: ok
+  /books:
+    get:
+      responses:
+        '200':
+          description: ok

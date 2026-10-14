@@ -1,0 +1,9 @@
+{
+  "covered": [
+    "book",
+    "isbn",
+    "loan"
+  ],
+  "missing": [],
+  "conclusive": true
+}
