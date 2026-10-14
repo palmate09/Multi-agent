@@ -33,3 +33,6 @@ frontend/.vite/
 *.key
 # TS incremental build cache
 *.tsbuildinfo
+
+# Written by bootstrap-env on the deploy host; never commit.
+.deploy-password

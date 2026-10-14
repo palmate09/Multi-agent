@@ -479,13 +479,30 @@ class RunStore:
         run.status = "running"
         run.updated_at = _now()
         run.emit("pipeline", "start", {"run_id": run.run_id, "nodes": list(NODES)})
+        # `use_docker` is tri-state, and the middle value matters. It used to be
+        # read as `options.get("use_docker", settings.sandbox_use_docker)` and
+        # `sandbox_use_docker` defaulted to False -- so every run ignored
+        # SANDBOX_MODE and executed the generated suite as a subprocess inside
+        # the backend container. That was wrong twice over: no isolation (which
+        # is the entire point of the sandbox), and the runtime image carries no
+        # pytest, so every attempt died with "No module named pytest" and the
+        # run burned all four developer retries before reporting `unresolved`.
+        #
+        # So: an explicit per-run option wins, otherwise defer to whatever
+        # SANDBOX_MODE actually resolved to. `settings.sandbox_use_docker` stays
+        # as the explicit override for deployments that want to pin it.
+        explicit = run.options.get("use_docker")
+        if explicit is None:
+            use_docker = self.settings.sandbox_use_docker or Runner.uses_docker()
+        else:
+            use_docker = bool(explicit)
         try:
             with self._lock:
                 resume_state = self._resume_states.pop(run.run_id, None)
             run.state = run_team(
                 run.requirement,
                 out_dir=str(run.run_dir),
-                use_docker=bool(run.options.get("use_docker", self.settings.sandbox_use_docker)),
+                use_docker=use_docker,
                 skip_tester=bool(run.options.get("skip_tester")),
                 skip_reviewer=bool(run.options.get("skip_reviewer")),
                 skip_reasoner=bool(run.options.get("skip_reasoner")),

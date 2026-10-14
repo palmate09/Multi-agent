@@ -139,7 +139,13 @@ services:
       MAX_REQUIREMENT_CHARS: "8000"
       RUN_TIMEOUT_SECONDS: "3600"
       # Executing generated code has to be a decision somebody made.
-      PREVIEW_ALLOW_START: "${PREVIEW_ALLOW_START:-1}"
+      # Default OFF, matching `Settings.previews_enabled` ("off in production").
+      # The compose default used to be 1, which contradicted the code and meant
+      # an internet-facing host would run model-generated code because someone
+      # clicked a button. The sandbox is genuinely isolated now, so enabling
+      # this is reasonable -- but it should be a decision, not a default.
+      # Set PREVIEW_ALLOW_START=1 in .env to turn the Playground on.
+      PREVIEW_ALLOW_START: "${PREVIEW_ALLOW_START:-0}"
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
       GEMINI_MODEL: "${GEMINI_MODEL:-}"
       GROQ_API_KEY: "${GROQ_API_KEY:-}"
@@ -170,7 +176,7 @@ services:
       resources:
         limits:
           memory: 4g
-    networks: [edge, inner, sandbox-net]
+    networks: [edge, inner]
 
   # The only service with a Docker socket. It starts and stops containers and
   # does nothing else; the backend reaches it over the internal network.
@@ -233,7 +239,13 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    networks: [inner]
+    # `sandbox-net` because the sidecar is the only component that can
+    # be on the untrusted network -- it has to be, to reach the containers
+    # it starts. The backend is deliberately NOT on it: that keeps the
+    # platform's own API out of reach of model-generated code, and it is
+    # why preview traffic is relayed through the sidecar instead of dialled
+    # directly.
+    networks: [edge, inner, sandbox-net]
 
   # Bring your own LLM on the VM. Behind a profile on purpose: an idle 8 GB
   # container is a large waste when hosted tiers are configured, and a profile

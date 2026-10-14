@@ -81,7 +81,12 @@ services:
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
     ports:
-      - "8000:8000"
+      # Loopback only. The dev stack runs with AUTH disabled, so publishing
+      # it on 0.0.0.0 hands anyone who can reach the host an unauthenticated
+      # API that runs LLM-generated code. Use deploy/docker-compose.prod.yml
+      # (Caddy on :80/:443, auth required) for anything reachable from a browser
+      # on another machine.
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./backend:/app
       - runs-data:/data/runs
@@ -108,7 +113,7 @@ services:
     environment:
       VITE_BACKEND_URL: http://backend:8000
     ports:
-      - "5173:5173"
+      - "127.0.0.1:5173:5173"
     volumes:
       - ./frontend:/app
       - frontend-modules:/app/node_modules
