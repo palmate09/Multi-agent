@@ -16,6 +16,12 @@ os.environ.setdefault("AGENT_TEAM_TESTING", "1")
 # network. Container behaviour is covered deliberately and explicitly by
 # backend/tests/test_sandbox_runner.py instead.
 os.environ["SANDBOX_MODE"] = "subprocess"
+
+# Settings reads this file directly (see Settings.model_config), bypassing
+# os.environ, so it is what makes the suite independent of the developer's own
+# .env. Without it a local PREVIEW_ALLOW_START or LLM key changes what the tests
+# are actually asserting.
+os.environ["MAT_ENV_FILE"] = os.devnull
 # A developer's .env must never influence a test run.
 os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 
@@ -28,6 +34,18 @@ BACKEND = Path(__file__).resolve().parent.parent
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
+
+# The suite must not inherit the developer's .env. `Settings` and `AuthConfig`
+# both call `load_dotenv()`, which writes into os.environ and would undo any
+# `monkeypatch.delenv` -- so a test asserting a *default* would silently become
+# a test of whatever this machine happens to have configured. Neutralising the
+# loader keeps every environment assertion here about the code, not the box.
+try:  # pragma: no cover - only when python-dotenv is installed
+    import dotenv as _dotenv
+
+    _dotenv.load_dotenv = lambda *a, **k: False
+except Exception:  # pragma: no cover
+    pass
 
 def pytest_collection_modifyitems(config, items):
     """Deselect ``live_llm`` tests unless Ollama actually answers.

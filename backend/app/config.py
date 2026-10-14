@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -10,7 +11,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # `env_file` is overridable so the test suite can point it at nothing.
+    # pydantic-settings reads this path directly, bypassing `os.environ`, so a
+    # `monkeypatch.delenv` cannot stop it -- which means a developer with
+    # PREVIEW_ALLOW_START=1 in their .env silently changes what a test asserting
+    # the *default* measures. The suite failed here for exactly that reason.
+    model_config = SettingsConfigDict(
+        env_file=os.getenv("MAT_ENV_FILE", ".env"), env_file_encoding="utf-8", extra="ignore"
+    )
 
     app_name: str = "Multi-Agent Software Team"
     version: str = "1.0.0"

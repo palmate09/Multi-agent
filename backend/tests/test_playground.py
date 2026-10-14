@@ -569,6 +569,11 @@ def test_previews_are_blocked_in_production(runs_root, run_dir, monkeypatch):
 
     monkeypatch.setenv("RUNS_DIR", str(runs_root))
     monkeypatch.setenv("ENVIRONMENT", "production")
+    # This asserts the *default*, so the ambient override has to go: settings
+    # read the developer's .env, and a deployment that has set
+    # PREVIEW_ALLOW_START=1 would otherwise turn this into a test of their
+    # configuration rather than of the default.
+    monkeypatch.delenv("PREVIEW_ALLOW_START", raising=False)
     get_settings.cache_clear()
     reset_playground()
     app = create_app()

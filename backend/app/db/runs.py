@@ -366,6 +366,25 @@ class RunIndex:
         except Exception as exc:
             log.debug("could not record the preview state for %s: %s", run_id, exc)
 
+    def requirement(self, run_id: str) -> str | None:
+        """The stored requirement text for a run, or ``None``.
+
+        A last-resort source for `rehydrate`, for directories written before
+        `run.json` existed. The index is derived from the filesystem, so this
+        can only ever be as good as what was indexed -- never better.
+        """
+        if not self.enabled:
+            return None
+        try:
+            with self._db.connect() as conn:
+                row = conn.execute(
+                    "SELECT requirement FROM runs WHERE id = :i", {"i": run_id}
+                ).fetchone()
+            return str(row[0]) if row and row[0] is not None else None
+        except Exception as exc:
+            log.debug("could not read the requirement for %s: %s", run_id, exc)
+            return None
+
     # ---------------------------------------------------------- reconcile --
     def reconcile(self, run_dirs: Iterable[tuple[str, Path]]) -> dict[str, int]:
         """Make the index agree with the filesystem, or drop what it cannot verify.

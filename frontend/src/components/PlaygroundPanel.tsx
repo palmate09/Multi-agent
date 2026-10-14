@@ -26,7 +26,7 @@ const TONE: Record<PreviewState, 'good' | 'warn' | 'bad' | 'idle'> = {
 const EXPLAIN: Record<PreviewState, string> = {
   stopped: 'Not running.',
   starting: 'Booting the generated app…',
-  running: 'The app is serving on a loopback port behind the gateway.',
+  running: 'The app is serving behind the gateway, in an isolated sandbox container.',
   crashed: 'The app did not come up. The log below is what it printed.',
 };
 
@@ -83,7 +83,13 @@ export function PlaygroundPanel({ run, reloadKey, onReload }: Props) {
   };
 
   const state: PreviewState = status?.state ?? 'stopped';
-  const url = status?.url ?? `/preview/${run.run_id}/`;
+  // Point the frame at a path the app actually declares. `/` is often not a
+  // route, and a 404 inside the iframe reads as a broken playground when the
+  // app is serving perfectly well.
+  const entry = status?.entry_path ?? '/';
+  const url = status?.url
+    ? `${status.url.replace(/\/$/, '')}${entry === '/' ? '/' : entry}`
+    : `/preview/${run.run_id}${entry === '/' ? '/' : entry}`;
   const running = state === 'running';
   const idleMinutes = status ? Math.round((status.idle_seconds ?? 0) / 60) : 0;
 
@@ -106,7 +112,7 @@ export function PlaygroundPanel({ run, reloadKey, onReload }: Props) {
             loading={busy && !running}
             loadingLabel="Booting…"
             onClick={() => void act(() => api.startPreview(run.run_id))}
-            title="Boot the generated app on a loopback port and serve it at /preview"
+            title="Boot the generated app in an isolated container and serve it at /preview"
           >
             {state === 'stopped' ? 'Start' : 'Restart'}
           </Button>
@@ -146,7 +152,8 @@ export function PlaygroundPanel({ run, reloadKey, onReload }: Props) {
               Refresh
             </Button>
             <span className="hint">
-              port {status?.port} on loopback · idle {idleMinutes}m
+              {status?.mode === 'container' ? 'isolated container' : 'local subprocess'} · idle{' '}
+              {idleMinutes}m
             </span>
           </div>
         </>
@@ -160,9 +167,9 @@ export function PlaygroundPanel({ run, reloadKey, onReload }: Props) {
             </Button>
           }
         >
-          Start the preview to load the generated app here. It runs as a real subprocess on this
-          host with the platform&apos;s API keys stripped from its environment — that is a
-          mitigation, not isolation.
+          Start the preview to load the generated app here. It runs in a hardened container on an
+          internal network with no route off the host, no platform credentials, and the code mounted
+          read-only.
         </EmptyState>
       )}
 

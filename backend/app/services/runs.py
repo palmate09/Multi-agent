@@ -314,6 +314,7 @@ class RunStore:
     def create(self, requirement: str, run_id: str | None = None, **options: Any) -> Run:
         rid = self.new_id(run_id)
         run = Run(rid, requirement, self.settings.runs_dir / rid, options)
+        self._persist_manifest(run)
         with self._lock:
             self._runs[rid] = run
         get_index().upsert_run(
@@ -324,6 +325,33 @@ class RunStore:
             user_id=run.user_id,
         )
         return run
+
+    def _persist_manifest(self, run: Run) -> None:
+        """Write ``run.json`` so the directory describes its own run.
+
+        Without it the requirement exists only in memory and in the database, so
+        a restart rebuilds every run from disk with no requirement and the UI
+        shows a column of "(restored run)" -- indistinguishable, which is worse
+        than showing nothing. The filesystem is the artifact store and the
+        documented source of truth after a restart, so it has to carry this.
+        """
+        try:
+            run.run_dir.mkdir(parents=True, exist_ok=True)
+            (run.run_dir / "run.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": run.run_id,
+                        "requirement": run.requirement,
+                        "created_at": run.created_at,
+                        "options": dict(run.options),
+                    },
+                    indent=2,
+                )
+            )
+        except OSError as exc:
+            # Not fatal: the run is already registered in memory and in the
+            # index. Only the post-restart requirement text is lost.
+            log.warning("could not write run.json for %s: %s", run.run_id, exc)
 
     def get(self, run_id: str) -> Run | None:
         with self._lock:
@@ -551,12 +579,23 @@ class RunStore:
                 if d.name in self._runs:
                     continue
                 requirement = ""
+                # run.json is written when the run is created, so this is the
+                # normal path. The older sources are fallbacks for directories
+                # that predate it -- and the database is the last resort, since
+                # the index is derived from these same directories.
+                manifest = d / "run.json"
+                if manifest.exists():
+                    with contextlib.suppress(json.JSONDecodeError, OSError):
+                        requirement = json.loads(manifest.read_text()).get("requirement", "")
                 stories_file = d / "stories.json"
-                if stories_file.exists():
+                if not requirement and stories_file.exists():
                     try:
                         requirement = json.loads(stories_file.read_text()).get("requirement", "")
                     except json.JSONDecodeError:
                         requirement = ""
+                if not requirement:
+                    with contextlib.suppress(Exception):
+                        requirement = get_index().requirement(d.name) or ""
                 run = Run(d.name, requirement or "(restored run)", d, {})
                 summary_file = d / "summary.json"
                 run.status = "restored"

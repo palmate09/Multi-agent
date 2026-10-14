@@ -255,6 +255,19 @@ class PreviewSession:
             return self.proxy_url
         return f"http://{self.host}:{self.port}"
 
+    @property
+    def entry_path(self) -> str:
+        """The best path to open the preview at: the spec's first real route.
+
+        Same list the boot probe uses, so the frame and the health check agree
+        on what "the app is up" means. Falls back to ``/`` for an app that
+        declares nothing, which is then also what the probe tried.
+        """
+        try:
+            return _probe_paths(self.run_dir)[0]
+        except Exception:
+            return "/"
+
     def alive(self) -> bool:
         if self.terminating:
             return False
@@ -299,6 +312,11 @@ class PreviewSession:
             # but "subprocess" is the single most important thing to know when
             # reading a screenshot of a machine you do not trust.
             "mode": self.mode,
+            # Where the iframe should actually point. `/` is frequently not a
+            # route the generated app declares, so pointing the frame at the
+            # gateway root gives a 404 for a perfectly healthy app -- which
+            # reads as "the playground is broken" when the app is serving.
+            "entry_path": self.entry_path,
             "log_tail": self.log_tail(),
         }
 

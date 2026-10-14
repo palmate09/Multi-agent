@@ -117,6 +117,10 @@ export interface PreviewStatus {
   idle_seconds: number;
   error: string | null;
   log_tail: string;
+  /** Which transport ran it: 'container' or 'subprocess'. */
+  mode?: string | null;
+  /** A path the generated app actually serves; `/` is often not one of them. */
+  entry_path?: string | null;
 }
 
 export interface RunDetail extends RunSummary {
