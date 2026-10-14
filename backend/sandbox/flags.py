@@ -225,7 +225,14 @@ def run_argv(
     if with_data and limits.data_mount:
         # Writable, but not the code: this is where a generated app's SQLite
         # file goes, so `--read-only` on /app costs it nothing.
-        argv += ["--tmpfs", f"{limits.data_mount}:rw,nosuid,size=64m"]
+        # `mode=1777` explicitly. Docker's default tmpfs mode is 1777, but
+        # dropping CAP_MKNOD (which --cap-drop ALL does) makes the mount come up
+        # 0755 owned by root instead, and the sandbox runs as uid 10001 -- so
+        # `mkdir /data/w` failed with PermissionError and every generated suite
+        # that writes a database next to itself failed to run. Measured: same
+        # flags, `--tmpfs /data:rw,nosuid,size=64m` gives 1777 on its own and
+        # 755 under --cap-drop ALL. State it rather than inherit it.
+        argv += ["--tmpfs", f"{limits.data_mount}:rw,nosuid,mode=1777,size=64m"]
     for key, value in (env or {}).items():
         argv += ["-e", f"{key}={value}"]
     if publish_port is not None:

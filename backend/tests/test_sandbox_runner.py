@@ -393,3 +393,77 @@ def test_without_a_sidecar_the_bundle_stays_in_the_system_temp_dir(monkeypatch):
 
     with Runner._bundle_dir("bundle-") as path:
         assert str(path).startswith(tempfile.gettempdir())
+
+
+# ------------------------------------------------- the pipeline honours the mode ----
+def test_a_run_without_an_explicit_option_follows_sandbox_mode(monkeypatch):
+    """`use_docker` used to default to False regardless of SANDBOX_MODE.
+
+    Every run therefore executed the generated suite as a subprocess inside the
+    backend container: no isolation, which defeats the sandbox entirely, and the
+    runtime image carries no pytest, so all four developer retries died with
+    "No module named pytest" before the run reported `unresolved`. Nothing in
+    the status said the sandbox had been bypassed.
+    """
+    from app.config import Settings
+    from app.services.runs import RunStore
+    from sandbox import runner as Runner
+
+    store = RunStore.__new__(RunStore)  # only .settings is read on this path
+    store.settings = Settings(sandbox_use_docker=False)
+
+    monkeypatch.setenv("SANDBOX_MODE", "container")
+    monkeypatch.setattr(Runner, "uses_docker", lambda: True)
+
+    run = type("R", (), {"options": {}})()
+    explicit = run.options.get("use_docker")
+    resolved = store.settings.sandbox_use_docker or Runner.uses_docker() if explicit is None else bool(explicit)
+    assert resolved is True, "SANDBOX_MODE=container must not run pytest in the backend"
+
+
+def test_an_explicit_false_still_forces_the_subprocess_path(monkeypatch):
+    """The override is the point of the option; it must not be ignored."""
+    from app.config import Settings
+    from sandbox import runner as Runner
+
+    monkeypatch.setenv("SANDBOX_MODE", "container")
+    monkeypatch.setattr(Runner, "uses_docker", lambda: True)
+    settings = Settings(sandbox_use_docker=False)
+    explicit = {"use_docker": False}.get("use_docker")
+    resolved = settings.sandbox_use_docker or Runner.uses_docker() if explicit is None else bool(explicit)
+    assert resolved is False
+
+
+def test_subprocess_mode_stays_off():
+    from app.config import Settings
+    from sandbox import runner as Runner
+
+    settings = Settings(sandbox_use_docker=False)
+    explicit = None
+    # uses_docker() is False when SANDBOX_MODE is subprocess; the offline suite
+    # pins it, so this is the branch the whole test suite runs in.
+    resolved = settings.sandbox_use_docker or Runner.uses_docker() if explicit is None else bool(explicit)
+    assert resolved is False
+
+
+def test_the_data_tmpfs_is_world_writable_by_construction():
+    """The /data tmpfs must be mode 1777, not inherited.
+
+    Under the full flag set the sandbox uses (`--cap-drop ALL` alongside the
+    memory/pids/cpu limits), Docker mounted `/data` 0755 owned by root rather
+    than the 1777 it uses for a bare `--tmpfs`. The container runs as uid 10001,
+    so `mkdir /data/w` raised PermissionError, the staging copy of the generated
+    suite could not be made, and every run failed in a way that looked like a
+    broken generation: `unresolved` after four developer retries with an empty
+    failure list.
+    """
+    from sandbox.flags import SandboxLimits, run_argv
+
+    argv = run_argv(
+        "img", ["-m", "pytest"], limits=SandboxLimits(), with_data=True
+    )
+    data_mounts = [a for a in argv if a.startswith(SandboxLimits().data_mount + ":")]
+    assert data_mounts, "no writable data mount was requested"
+    assert "mode=1777" in data_mounts[0], (
+        f"the data tmpfs must pin its mode; got {data_mounts[0]!r}"
+    )

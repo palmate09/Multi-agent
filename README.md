@@ -39,6 +39,21 @@ API out of reach of model-generated code. The sidecar spans both networks, so
 preview traffic is relayed through it (`/sandbox/proxy/<id>/…`) rather than
 dialled directly.
 
+## Deploying it
+
+`./start.sh --prod` runs the same topology behind Caddy, with Postgres and
+authentication required:
+
+```bash
+./deploy/bootstrap-env.sh                       # credentials, printed once
+./start.sh --prod                               # or the raw command:
+docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d --build
+```
+
+Then browse the host's IP. `PREVIEW_ALLOW_START` defaults to **off** there,
+because on an internet-facing host "run the generated code" should be a
+decision; set it to `1` in `.env` to enable the Playground.
+
 ## Running it
 
 ```bash

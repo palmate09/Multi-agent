@@ -309,12 +309,9 @@ def create_run(payload: RunRequest) -> dict[str, Any]:
     mount_volume = _mount_volume()
     requested = payload.mount
     if requested is None and payload.workdir and mount_volume:
-        # The caller named the bundle by its path *inside* the mount (the only
-        # form that survives a `-v` source, which the daemon resolves on the
-        # host). Turn it back into the host-side path so it goes through
-        # `_resolve_mount` like any other request -- confinement is not
-        # weakened by the caller having phrased it differently, and a workdir
-        # pointing outside the mount is refused exactly as a mount would be.
+        # Fallback for a caller that named the bundle by its path *inside* the
+        # mount rather than stating the mount. Confinement is unchanged: the
+        # result still goes through `_resolve_mount`.
         rel = PurePosixPath(payload.workdir)
         try:
             rel = rel.relative_to(limits.workdir)
@@ -325,9 +322,16 @@ def create_run(payload: RunRequest) -> dict[str, Any]:
             ) from None
         requested = str(mount_root() / rel)
     resolved_mount = _resolve_mount(requested)
+    # The workdir is where the process runs, which need not be inside the mount.
+    # pytest runs on the writable tmpfs so a generated test's relative SQLite
+    # path has somewhere to go, while the code stays mounted read-only. Only a
+    # workdir *inside* the mount is rewritten here; anything else is the
+    # caller's own choice and is passed through untouched.
+    requested_workdir = payload.workdir
+    if requested_workdir and requested_workdir.startswith(limits.workdir + "/"):
+        requested_workdir = None
     env = _sanitise_env(payload.env)
-    workdir = None
-    if mount_volume and resolved_mount:
+    if mount_volume and resolved_mount and requested_workdir is None:
         # The requester is a container, so `resolved_mount` names a path that
         # exists only inside this container's own mount of the runs volume. The
         # daemon resolves `-v` against the **host**, so passing it through would
@@ -341,7 +345,7 @@ def create_run(payload: RunRequest) -> dict[str, Any]:
         # the workdir is derived from that same checked path.
         root = mount_root()
         rel = Path(resolved_mount).resolve().relative_to(root)
-        workdir = f"{limits.workdir}/{rel.as_posix()}"
+        requested_workdir = f"{limits.workdir}/{rel.as_posix()}"
     # The sidecar owns the socket, so it is also the only place that can build
     # the image. Doing it here rather than leaving it to a deploy step means a
     # fresh host works without a manual `docker build` someone has to remember.
@@ -359,7 +363,7 @@ def create_run(payload: RunRequest) -> dict[str, Any]:
         name=payload.name,
         mount=None if mount_volume else resolved_mount,
         mount_volume=mount_volume if resolved_mount else None,
-        workdir=workdir,
+        workdir=requested_workdir,
         env=env,
         detach=payload.detach,
         with_data=payload.with_data,

@@ -692,7 +692,7 @@ class PlaygroundService:
             detach=True,
             with_data=True,
         )
-        session.container_id = Docker.start_detached(argv)
+        session.container_id = Docker.start_detached(argv, mount=str(session.workdir))
         session.host, session.port = Docker.reachable_address(
             session.container_id, limits.network, _CONTAINER_PORT
         )

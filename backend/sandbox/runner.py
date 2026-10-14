@@ -374,19 +374,66 @@ def run_tests_container(
             if volume:
                 rel = tmp.relative_to(_mount_root() or tmp.parent)
                 inside = f"{limits.workdir}/{rel.as_posix()}"
+            # pytest runs with its working directory on the writable tmpfs, not
+            # in the read-only code mount. A generated test routinely points
+            # SQLite at a *relative* path -- `sqlite:///test_recipes.db` -- and
+            # a relative path resolves against the cwd, which is /app and
+            # therefore unwritable. That is not a bad generation: it is the
+            # read-only mount doing its job, and it failed every attempt with
+            # `sqlite3.OperationalError: unable to open database file`.
+            #
+            # The code stays mounted read-only at /app (so the suite still cannot
+            # rewrite the tests that grade it); PYTHONPATH=/app keeps `import
+            # main` resolving, and anything the run writes lands on the tmpfs.
+            # Collect only *this* bundle. With a volume mounted at the workdir,
+            # /app is the whole runs directory, so `pytest /app` collects every
+            # other run's tests on the host -- cross-run contamination, and a
+            # duplicate-basename error rather than a result.
+            target = inside or limits.workdir
+
+            # Run on a disposable copy, because generated code and generated
+            # tests both write next to themselves. A relative SQLite path
+            # resolves against the cwd, and `Path(__file__).parent` resolves into
+            # the mount -- and the mount is read-only on purpose, so that a
+            # generated suite cannot rewrite the platform's copy of the very
+            # tests that are about to grade it.
+            #
+            # Making the mount writable to fix that would trade the control for
+            # convenience. Copying instead keeps the host copy read-only (so a
+            # container still cannot tamper with the stored artifacts, the spec,
+            # or any other run) and gives the run somewhere disposable to write,
+            # which is what a CI runner does with a build directory anyway.
+            work = limits.data_mount or "/tmp"
+            staged = f"{work}/w"
+            # Expressed in Python rather than shell on purpose. The sidecar
+            # rebuilds the argv from allowlisted fields and deliberately drops
+            # the caller's entrypoint -- "python -m ..." is the whole surface, and
+            # letting a caller name the entrypoint would let it name the program.
+            # So the staging runs under the fixed `python` entrypoint instead.
+            script = (
+                "import os,shutil,subprocess,sys;"
+                f"d={staged!r};"
+                "shutil.rmtree(d,ignore_errors=True);"
+                f"shutil.copytree({target!r},d);"
+                "os.chdir(d);"
+                "sys.exit(subprocess.call([sys.executable,'-m','pytest','-q','-p','no:cacheprovider']))"
+            )
             argv = run_argv(
                 image,
-                list(PYTEST_ARGS),
+                ["-c", script],
                 limits=limits,
                 mount=None if volume else str(tmp),
                 mount_volume=volume,
-                workdir=inside,
+                workdir=limits.data_mount if limits.data_mount else inside,
                 env=sandbox_env(),
                 entrypoint="python",
                 with_data=True,
             )
             with _slot(limits):
-                result = Docker.run_container(argv, timeout=timeout)
+                # The mount is stated, not inferred from argv: the cwd is now the
+                # writable tmpfs, so the workdir no longer names the bundle, and
+                # the sidecar can only confine a mount it is actually given.
+                result = Docker.run_container(argv, timeout=timeout, mount=str(tmp))
             output = result.output
             return _annotate(_parse_pytest(output), output, _importable_modules(code))
         except Docker.DockerUnavailable as exc:
@@ -568,17 +615,32 @@ def _exec_in_container(py_args: list[str], workdir: Path, timeout: int) -> str:
         image = Docker.ensure_image(limits.image)
     except Docker.DockerUnavailable as exc:
         return f"sandbox unavailable: {exc}"
+    # Same reasoning as the test loop: behind a sidecar the mount is by volume
+    # and the workdir names the bundle *inside* it, or a host path that the
+    # daemon cannot resolve. The boot probe imports the app by module name, so
+    # getting this wrong presents as `ModuleNotFoundError: No module named
+    # 'main'` -- which reads as a broken generation rather than a mount that
+    # arrived empty.
+    volume = _runs_volume()
+    inside = None
+    if volume:
+        root = _mount_root()
+        if root and root in workdir.parents:
+            rel = workdir.relative_to(root)
+            inside = f"{limits.workdir}/{rel.as_posix()}"
     argv = run_argv(
         image,
         py_args,
         limits=limits,
-        mount=str(workdir),
+        mount=None if volume else str(workdir),
+        mount_volume=volume if inside else None,
+        workdir=inside,
         env=sandbox_env(),
         entrypoint="python",
         with_data=True,
     )
     with _slot(limits):
-        return Docker.run_container(argv, timeout=timeout).output
+        return Docker.run_container(argv, timeout=timeout, mount=str(workdir)).output
 
 
 

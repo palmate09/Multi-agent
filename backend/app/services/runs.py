@@ -24,6 +24,7 @@ from typing import Any
 from app.config import Settings, get_settings
 from app.db.runs import get_index
 from graph.workflow import NODES, reconstruct_state, run_team
+from sandbox import runner as Runner
 
 log = logging.getLogger("app.runs")
 

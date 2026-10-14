@@ -242,10 +242,14 @@ def ensure_image(base: str = "agent-team-sandbox:local", context: Path | None = 
         return tag
 
 
-def run_container(argv: list[str], timeout: int = RUN_TIMEOUT) -> ContainerResult:
+def run_container(
+    argv: list[str],
+    timeout: int = RUN_TIMEOUT,
+    mount: str | None = None,
+) -> ContainerResult:
     _r = _remote()
     if _r is not None:
-        return _r.run_container(argv, timeout)
+        return _r.run_container(argv, timeout, mount=mount)
     """``docker run`` with the full argv, returning output rather than raising.
 
     A container that exits non-zero is a *result* -- a failing test suite is
@@ -259,10 +263,10 @@ def run_container(argv: list[str], timeout: int = RUN_TIMEOUT) -> ContainerResul
     )
 
 
-def start_detached(argv: list[str], timeout: int = 60) -> str:
+def start_detached(argv: list[str], timeout: int = 60, mount: str | None = None) -> str:
     _r = _remote()
     if _r is not None:
-        return _r.start_detached(argv, timeout)
+        return _r.start_detached(argv, timeout, mount=mount)
     """Start a long-lived container. Returns its id.
 
     ``docker run -d`` rather than ``docker run`` followed by a list, so the id

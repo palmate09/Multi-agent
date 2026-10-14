@@ -209,10 +209,18 @@ def _noop(*_args: Any, **_kwargs: Any) -> Any:
     return None
 
 
-def run_container(argv: list[str], timeout: int = 120) -> Any:
+def run_container(
+    argv: list[str], timeout: int = 120, mount: str | None = None
+) -> Any:
     from .docker import ContainerResult
 
     payload = decompose(argv)
+    # The caller states the mount rather than it being recovered from argv.
+    # pytest now runs with its cwd on the writable tmpfs, so the workdir no
+    # longer names the bundle -- and a mount the sidecar cannot check is a mount
+    # it cannot confine. Naming it here keeps `_resolve_mount` in the path.
+    if mount:
+        payload["mount"] = mount
     body = _post({**payload, "detach": False, "timeout": timeout}, timeout=timeout + 60)
     return ContainerResult(
         returncode=int(body.get("returncode", -1)),
@@ -221,8 +229,10 @@ def run_container(argv: list[str], timeout: int = 120) -> Any:
     )
 
 
-def start_detached(argv: list[str], timeout: int = 60) -> str:
+def start_detached(argv: list[str], timeout: int = 60, mount: str | None = None) -> str:
     payload = decompose(argv)
+    if mount:
+        payload["mount"] = mount
     body = _post({**payload, "detach": True}, timeout=timeout + 60)
     cid = body.get("id") or ""
     if not cid:
