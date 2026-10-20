@@ -403,9 +403,7 @@ class RunIndex:
         on_disk = dict(run_dirs)
         try:
             with self._db.connect() as conn:
-                known = {
-                    row[0] for row in conn.execute("SELECT id FROM runs").fetchall()
-                }
+                known = {row[0] for row in conn.execute("SELECT id FROM runs").fetchall()}
                 for run_id in known - set(on_disk):
                     conn.execute("DELETE FROM runs WHERE id = :r", {"r": run_id})
                     stats["removed"] += 1

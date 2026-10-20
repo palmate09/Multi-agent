@@ -461,10 +461,7 @@ def _print_report(report: dict) -> None:
         f"llm    calls p50={agg['llm']['calls_p50']}  seconds p50={agg['llm']['seconds_p50']}s  "
         f"truncations={agg['llm']['truncations']}"
     )
-    print(
-        f"sandbox seconds p50={agg['sandbox']['seconds_p50']}s  "
-        f"calls={agg['sandbox']['calls']}"
-    )
+    print(f"sandbox seconds p50={agg['sandbox']['seconds_p50']}s  calls={agg['sandbox']['calls']}")
     print("per-stage wall seconds (mean):")
     for node, s in list(agg["stages"].items())[:10]:
         print(f"  {node:<14} {s['mean']:>7}s  (seen {s['seen']}x)")

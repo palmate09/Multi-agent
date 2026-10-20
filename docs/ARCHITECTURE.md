@@ -1,6 +1,7 @@
 # Multi-Agent Software Team — Architecture
 
-> Plain-English requirement → tested, reviewed REST API via 5 cooperating LLM agents.
+> Plain-English requirement → tested, reviewed **full-stack application** via 5
+> cooperating LLM agents.
 > Source: `docs/Multi-Agent Software Team Project Plan.pdf` + 8 grounding papers.
 
 ## 1. Goal and success claim
@@ -8,8 +9,12 @@
 Build a team that **beats a single-agent baseline** on the same requirements,
 measured by test pass rate, spec coverage, attempts-to-green, reviewer recall, cost.
 
-Target output: **FastAPI + SQLite + pytest** app running in Docker, driven by an
-**OpenAPI spec** derived from user stories.
+Target output: a **FastAPI + SQLite + pytest** application, driven by an
+**OpenAPI spec** derived from user stories, that also serves a web interface —
+a product a person can open and use, not a bag of endpoints. A run produces a
+`fullstack` app (backend plus interface, the default), an `api` service (when
+the requirement asks for one explicitly) or a `program` (a library, a CLI, a
+game).
 
 ## 2. System overview
 

@@ -80,6 +80,10 @@ def plan(requirement: str, stories: UserStories | None = None) -> Plan:
     """
     prompt = f"Requirement:\n{requirement}\n"
     if stories is not None:
+        if stories.analysis.strip():
+            prompt += (
+                f"\nPM analysis (actors, entities, workflows, failure cases):\n{stories.analysis}\n"
+            )
         listing = "\n".join(
             f"- {s.id}: {s.title} ({'; '.join(s.acceptance)})" for s in stories.stories
         )

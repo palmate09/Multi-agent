@@ -12,7 +12,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from app.config import Settings, get_settings
 from app.dependencies import get_store
-from app.schemas import RunCreate, RunDetail, RunSummary
+from app.schemas import FollowUpCreate, RunCreate, RunDetail, RunSummary
 from app.services.runs import Run, RunningError, RunStore
 
 log = logging.getLogger("app.api.runs")
@@ -63,7 +63,12 @@ def list_runs(store: RunStore = Depends(get_store)) -> list[RunSummary]:
 
 @router.get("/{run_id}", response_model=RunDetail)
 def get_run(run_id: str, store: RunStore = Depends(get_store)) -> RunDetail:
-    return RunDetail(**_get_run(run_id, store).detail())
+    run = _get_run(run_id, store)
+    detail = run.detail()
+    # The follow-up turns of this run, oldest first: the history of an app
+    # that has been changed since it was first generated.
+    detail["followups"] = store.followups_of(run_id)
+    return RunDetail(**detail)
 
 
 @router.get("/{run_id}/events")
@@ -193,4 +198,31 @@ def resume_run(run_id: str, store: RunStore = Depends(get_store)) -> RunSummary:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if new_run is None:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    return RunSummary(**new_run.summary)
+
+
+@router.post("/{run_id}/followups", response_model=RunSummary, status_code=status.HTTP_202_ACCEPTED)
+def add_followup(
+    run_id: str,
+    payload: FollowUpCreate,
+    store: RunStore = Depends(get_store),
+) -> RunSummary:
+    """Apply one change to an app that already exists.
+
+    The change runs as a child of this run: it starts from the run's artifacts
+    and applies the instruction, so the result is the same product with one
+    thing different. Follow-ups of the same run are executed **one at a time**,
+    in the order they were given.
+
+    Returns 409 while the run is still working (wait for it to settle) and 422
+    for an empty instruction.
+    """
+    try:
+        new_run = store.add_followup(run_id, payload.prompt)
+    except RunningError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return RunSummary(**new_run.summary)

@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { Fragment, useRef } from 'react';
 import type { KeyboardEvent, ReactNode } from 'react';
 
 import { cn } from '../../lib/cn';
@@ -8,6 +8,9 @@ export interface TabItem<T extends string> {
   label: string;
   /** A count, appended to the label — e.g. review comments, generated UI files. */
   badge?: ReactNode;
+  /** Tabs with the same `group` sit together; a thin divider marks where the
+   *  group changes. Purely visual: the tablist is still one list. */
+  group?: string;
 }
 
 export interface TabsProps<T extends string> {
@@ -68,23 +71,26 @@ export function Tabs<T extends string>({ items, value, onChange, children, label
   return (
     <>
       <div className="tabs" role="tablist" aria-label={label} ref={listRef} onKeyDown={onKeyDown}>
-        {items.map(item => {
+        {items.map((item, index) => {
           const selected = item.id === value;
+          const startsGroup = index > 0 && item.group !== items[index - 1].group;
           return (
-            <button
-              key={item.id}
-              id={`tab-${item.id}`}
-              role="tab"
-              type="button"
-              aria-selected={selected}
-              aria-controls={`tabpanel-${item.id}`}
-              tabIndex={selected ? 0 : -1}
-              className={cn(selected && 'active')}
-              onClick={() => onChange(item.id)}
-            >
-              {item.label}
-              {item.badge}
-            </button>
+            <Fragment key={item.id}>
+              {startsGroup && <span className="tab-sep" role="presentation" aria-hidden="true" />}
+              <button
+                id={`tab-${item.id}`}
+                role="tab"
+                type="button"
+                aria-selected={selected}
+                aria-controls={`tabpanel-${item.id}`}
+                tabIndex={selected ? 0 : -1}
+                className={cn(selected && 'active')}
+                onClick={() => onChange(item.id)}
+              >
+                {item.label}
+                {item.badge}
+              </button>
+            </Fragment>
           );
         })}
       </div>
@@ -99,5 +105,20 @@ export function Tabs<T extends string>({ items, value, onChange, children, label
         {children}
       </div>
     </>
+  );
+}
+
+/**
+ * A count shown as a pill. The parentheses are visually hidden but stay in the
+ * text, so the tab still reads "Review (2)" to a screen reader and to anything
+ * that looks at the text, while sighted users see a tidy pill.
+ */
+export function CountBadge({ count }: { count: number }) {
+  return (
+    <span className="tab-count">
+      <span className="visually-hidden"> (</span>
+      {count}
+      <span className="visually-hidden">)</span>
+    </span>
   );
 }

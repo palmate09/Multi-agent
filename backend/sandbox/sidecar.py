@@ -76,7 +76,9 @@ def image_allowed(image: str) -> bool:
     if not image:
         return False
     name = image.split("@", 1)[0].rsplit(":", 1)[0]
-    return any(name == a or name.startswith(f"{a}/") or name.startswith(f"{a}:") for a in allowed_images())
+    return any(
+        name == a or name.startswith(f"{a}/") or name.startswith(f"{a}:") for a in allowed_images()
+    )
 
 
 def mount_root() -> Path:
@@ -116,7 +118,15 @@ CREDENTIAL_BY_VALUE = frozenset({"DATABASE_URL"})
 
 #: Headers that describe a single hop and must not be relayed onward.
 _HOP_BY_HOP = frozenset(
-    {"connection", "keep-alive", "transfer-encoding", "upgrade", "te", "trailer", "proxy-authenticate"}
+    {
+        "connection",
+        "keep-alive",
+        "transfer-encoding",
+        "upgrade",
+        "te",
+        "trailer",
+        "proxy-authenticate",
+    }
 )
 
 
@@ -300,8 +310,7 @@ def create_run(payload: RunRequest) -> dict[str, Any]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
-                f"image {payload.image!r} is not on the allowlist "
-                f"({', '.join(allowed_images())})"
+                f"image {payload.image!r} is not on the allowlist ({', '.join(allowed_images())})"
             ),
         )
 
@@ -388,7 +397,9 @@ def create_run(payload: RunRequest) -> dict[str, Any]:
         container_id = Docker.start_detached(argv)
         host, port = Docker.reachable_address(container_id, limits.network)
     except Docker.DockerUnavailable as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
     return {"id": container_id, "host": host, "port": port, "started_at": time.time()}
 
 
@@ -478,8 +489,7 @@ async def proxy(container_id: str, request: Request, path: str = "") -> Response
     resp_headers = {
         k: v
         for k, v in upstream.headers.items()
-        if k.lower() not in _HOP_BY_HOP
-        and k.lower() not in {"content-encoding", "content-length"}
+        if k.lower() not in _HOP_BY_HOP and k.lower() not in {"content-encoding", "content-length"}
     }
     return Response(
         content=upstream.content,
@@ -507,5 +517,3 @@ def describe_network(name: str) -> dict[str, Any]:
 def container_logs(container_id: str, lines: int = 40) -> dict[str, str]:
     lines = max(1, min(int(lines), 500))
     return {"id": container_id, "logs": Docker.logs(container_id, lines)}
-
-

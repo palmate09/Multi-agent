@@ -74,9 +74,7 @@ class SessionStore:
         return self._db.configured
 
     # -- write ----------------------------------------------------------
-    def issue(
-        self, username: str, csrf: str, ip: str = "", user_agent: str = ""
-    ) -> IssuedSession:
+    def issue(self, username: str, csrf: str, ip: str = "", user_agent: str = "") -> IssuedSession:
         from app.auth import new_raw_session_token
 
         cfg = get_auth_config()

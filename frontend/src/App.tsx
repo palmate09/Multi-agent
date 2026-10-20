@@ -3,20 +3,25 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 
 import { api, setUnauthorizedHandler, subscribeToRun } from './api';
 import type { Health, PipelineEvent, RunDetail, RunSummary } from './types';
-import { statusTone } from './types';
 import { ConfirmModal } from './components/ConfirmModal';
 import { FileViewer } from './components/FileViewer';
 import { LoginPage } from './components/LoginPage';
 import { PipelineTimeline } from './components/PipelineTimeline';
 import { RequirementForm } from './components/RequirementForm';
+import { RunHeader } from './components/RunHeader';
 import { RunList } from './components/RunList';
+import { TeamOverview } from './components/TeamOverview';
 import { Alert } from './components/ui/Alert';
 import { Badge } from './components/ui/Badge';
 import { Button } from './components/ui/Button';
 import { Card, EmptyState } from './components/ui/Card';
+import { CodeBlock } from './components/ui/CodeBlock';
 import { ErrorBoundary } from './components/ui/ErrorBoundary';
+import { SkeletonGroup } from './components/ui/Skeleton';
+import { BrandMark, Icon } from './components/ui/Icon';
 import { Stat, StatGrid } from './components/ui/Stat';
-import { Tabs } from './components/ui/Tabs';
+import { CountBadge, Tabs } from './components/ui/Tabs';
+import { ThemeSwitch } from './components/ui/ThemeSwitch';
 import type { TabItem } from './components/ui/Tabs';
 import { ToastList } from './components/ui/Toast';
 import type { Toast } from './components/ui/Toast';
@@ -32,6 +37,9 @@ const EvalPanel = lazy(() =>
   import('./components/EvalPanel').then(m => ({ default: m.EvalPanel }))
 );
 const UiPanel = lazy(() => import('./components/UiPanel').then(m => ({ default: m.UiPanel })));
+const FollowUpPanel = lazy(() =>
+  import('./components/FollowUpPanel').then(m => ({ default: m.FollowUpPanel }))
+);
 const PlaygroundPanel = lazy(() =>
   import('./components/PlaygroundPanel').then(m => ({ default: m.PlaygroundPanel }))
 );
@@ -50,19 +58,23 @@ type Tab =
   | 'report'
   | 'review'
   | 'ui'
+  | 'followup'
   | 'playground';
 
+/* Grouped by what a person is doing: watching, reading the design, inspecting
+   the build, then shipping. The groups are drawn as a thin divider in the strip. */
 const TABS: ReadonlyArray<TabItem<Tab>> = [
-  { id: 'pipeline', label: 'Pipeline' },
-  { id: 'stories', label: 'Stories' },
-  { id: 'plan', label: 'Plan' },
-  { id: 'spec', label: 'OpenAPI' },
-  { id: 'code', label: 'Code' },
-  { id: 'tests', label: 'Tests' },
-  { id: 'report', label: 'Test report' },
-  { id: 'review', label: 'Review' },
-  { id: 'ui', label: 'UI' },
-  { id: 'playground', label: 'Playground' },
+  { id: 'pipeline', label: 'Pipeline', group: 'watch' },
+  { id: 'stories', label: 'Stories', group: 'design' },
+  { id: 'plan', label: 'Plan', group: 'design' },
+  { id: 'spec', label: 'OpenAPI', group: 'design' },
+  { id: 'code', label: 'Code', group: 'build' },
+  { id: 'tests', label: 'Tests', group: 'build' },
+  { id: 'report', label: 'Test report', group: 'build' },
+  { id: 'review', label: 'Review', group: 'build' },
+  { id: 'ui', label: 'UI', group: 'ship' },
+  { id: 'followup', label: 'Follow-up', group: 'ship' },
+  { id: 'playground', label: 'Playground', group: 'ship' },
 ];
 
 const POLL_MS = 1500;
@@ -362,7 +374,6 @@ export default function App() {
     ['cancelled', 'unresolved', 'unresolved_review', 'failed', 'blocked', 'domain_missed'].includes(
       detail.status
     );
-  const tone = statusTone(detail?.status ?? 'idle');
 
   const llmLabel = health
     ? health.llm.skip_ollama
@@ -371,6 +382,22 @@ export default function App() {
         ? `ollama: ${health.llm.ollama_models.length} model(s)`
         : 'no LLM backend'
     : 'connecting…';
+
+  const llmTone: 'good' | 'bad' | 'idle' = !health
+    ? 'idle'
+    : health.llm.skip_ollama
+      ? 'idle'
+      : health.llm.ollama_reachable
+        ? 'good'
+        : 'bad';
+
+  // Leaving a run for the form. Focus follows, so the keyboard lands where
+  // the person is about to type.
+  const newRun = () => {
+    setSelected(null);
+    setError(null);
+    requestAnimationFrame(() => document.getElementById('req')?.focus());
+  };
 
   if (authState === 'checking') {
     return (
@@ -390,33 +417,37 @@ export default function App() {
         Skip to main content
       </a>
       <header className="topbar">
-        <h1>Multi-Agent Software Team</h1>
-        <span className="sub">plain English → tested, reviewed REST API</span>
         <Button
-          className="sidebar-toggle"
+          className="sidebar-toggle icon-btn"
+          variant="ghost"
           aria-label="Toggle run list"
           aria-expanded={sidebarOpen}
           onClick={() => setSidebarOpen(!sidebarOpen)}
           aria-controls="sidebar"
         >
-          <span aria-hidden="true">☰</span>
+          <Icon name="menu" size={20} />
         </Button>
-        <span className="sub">plain English → tested, reviewed REST API</span>
+        <div className="brand">
+          <BrandMark />
+          <h1>Multi-Agent Software Team</h1>
+          <span className="sub">plain English → tested, reviewed full-stack app</span>
+        </div>
         <div className="spacer" />
-        <Badge tone="idle" title={llmLabel}>
-          {llmLabel}
-        </Badge>
+        <ThemeSwitch />
         {authEnabled && username && (
-          <>
-            <Badge tone="idle" title={`signed in as ${username}`}>
+          <div className="user">
+            <span className="avatar" aria-hidden="true">
+              {username.slice(0, 1).toUpperCase()}
+            </span>
+            <span className="user-name" title={`signed in as ${username}`}>
               {username}
-            </Badge>
-            <Button variant="ghost" onClick={() => void handleLogout()}>
-              Sign out
+            </span>
+            <Button variant="ghost" size="sm" onClick={() => void handleLogout()}>
+              <Icon name="log-out" size={15} />
+              <span className="user-signout">Sign out</span>
             </Button>
-          </>
+          </div>
         )}
-        <span className="sub">v{health?.version ?? '—'}</span>
       </header>
 
       <div className="layout">
@@ -426,188 +457,127 @@ export default function App() {
           onSelect={setSelected}
           onDelete={deleteRun}
           onRefresh={refreshRuns}
+          onNew={newRun}
           open={sidebarOpen}
           onClose={() => setSidebarOpen(false)}
+          footer={
+            <div className="sys" aria-label="System status">
+              <Badge tone={llmTone} title={llmLabel}>
+                {llmLabel}
+              </Badge>
+              {health && health.active_runs > 0 && (
+                <span className="sys-note">
+                  {health.active_runs} of {health.max_concurrent_runs} running
+                </span>
+              )}
+              <span className="sys-note sys-version">v{health?.version ?? '—'}</span>
+            </div>
+          }
         />
+        {sidebarOpen && (
+          <button
+            type="button"
+            className="sidebar-backdrop"
+            aria-label="Close run list"
+            tabIndex={-1}
+            onClick={() => setSidebarOpen(false)}
+          />
+        )}
 
         <main className="main" id="main-content">
-          <RequirementForm
-            onSubmit={startRun}
-            busy={busy}
-            error={error}
-            onRetry={() => setError(null)}
-            onDismissError={() => setError(null)}
-          />
-
-          {!detail ? (
-            <Card>
-              <h2>No run selected</h2>
-              <EmptyState
-                action={
-                  <Button
-                    variant="ghost"
-                    onClick={() => {
-                      document.getElementById('req')?.focus();
-                    }}
-                  >
-                    Write a requirement
-                  </Button>
-                }
-              >
-                Submit a requirement above, or pick a previous run from the list.
-              </EmptyState>
-            </Card>
-          ) : (
-            <>
-              <Card label={`Run ${detail.run_id}`}>
-                <div className="run-head">
-                  <div className="run-title">
-                    <h2>
-                      Run <code>{detail.run_id}</code>
-                    </h2>
-                    {/* A run's status changes on its own, so it is a
-                        live region: settling at `accepted` is the
-                        moment a user is waiting for. */}
-                    <span role="status" className="run-status">
-                      <Badge tone={tone} pulse={running || stoppingNow}>
-                        {detail.status}
-                      </Badge>
-                    </span>
-                  </div>
-                  <div className="row run-actions">
-                    {stoppable && (
-                      <Button
-                        variant="ghost"
-                        disabled={stopping}
-                        loading={stopping}
-                        loadingLabel="Stopping…"
-                        onClick={() => void stopRun(detail.run_id)}
-                        title="Request cancellation; the run settles at cancelled"
-                      >
-                        Stop
-                      </Button>
-                    )}
-                    {stoppingNow && !stoppable && <span className="hint">Stopping…</span>}
-                    {restartable && (
-                      <Button
-                        variant="ghost"
-                        onClick={() => setRestartTarget(detail.run_id)}
-                        title="Delete all of this run's data and start over"
-                      >
-                        Restart
-                      </Button>
-                    )}
-                    {resumable && (
-                      <Button
-                        variant="ghost"
-                        disabled={resuming}
-                        loading={resuming}
-                        loadingLabel="Resuming…"
-                        onClick={() => void resumeRun(detail.run_id)}
-                        title="Continue this run from its saved artifacts (nothing is deleted)"
-                      >
-                        Resume
-                      </Button>
-                    )}
-                  </div>
-                </div>
-                {detail.resumed_from && (
-                  <div className="hint run-meta">
-                    Resumed from <code>{detail.resumed_from}</code>
-                  </div>
-                )}
-                {detail.error && (
-                  <Alert tone="error" className="run-meta">
-                    {detail.error}
-                  </Alert>
-                )}
-
-                <StatGrid className="run-stats">
-                  <Stat value={detail.tests_passed} label="Tests passed" />
-                  <Stat value={detail.tests_failed} label="Failed" />
-                  <Stat value={detail.attempts_dev} label="Dev retries" />
-                  <Stat value={detail.attempts_test} label="Test retries" />
-                  <Stat value={detail.review_rounds} label="Review rounds" />
-                  <Stat value={detail.wall_time ?? '—'} label="Wall (s)" />
-                </StatGrid>
-
-                {detail.entrypoint && (
-                  <div className="hint run-meta">
-                    Entrypoint{' '}
-                    <code>
-                      {detail.entrypoint}
-                      {detail.files ? ` · ${detail.files.join(', ')}` : ''}
-                    </code>
-                  </div>
-                )}
-                {detail.coverage && detail.coverage.conclusive && (
-                  <Alert
-                    tone={detail.coverage.missing.length ? 'error' : 'note'}
-                    className="run-meta"
-                  >
-                    Domain check:{' '}
-                    {detail.coverage.missing.length === 0
-                      ? `all requirement terms present (${detail.coverage.covered.length})`
-                      : `missing ${detail.coverage.missing.join(', ')}`}
-                  </Alert>
-                )}
-                {detail.ui_report && (
-                  <Alert tone={detail.ui_report.ok ? 'note' : 'error'} className="run-meta">
-                    UI gate:{' '}
-                    {detail.ui_report.ok
-                      ? 'all static checks passed'
-                      : `failed ${detail.ui_report.checks
-                          .filter(c => !c.ok)
-                          .map(c => c.name)
-                          .join(', ')} (advisory)`}
-                  </Alert>
-                )}
+          <div className="main-inner">
+            {/* Keyed off `selected`, not `detail`: `detail` is cleared by an effect one
+                render later, which flashed the form while a run was loading and meant
+                the textarea was not mounted yet when "New run" tried to focus it. */}
+            {selected === null ? (
+              <>
+                <RequirementForm
+                  onSubmit={startRun}
+                  busy={busy}
+                  error={error}
+                  onRetry={() => setError(null)}
+                  onDismissError={() => setError(null)}
+                />
+                <TeamOverview />
+              </>
+            ) : !detail || detail.run_id !== selected ? (
+              <Card label="Loading run">
+                <SkeletonGroup label="Loading run" rows={4} />
               </Card>
+            ) : (
+              <>
+                {error && (
+                  <Alert tone="error">
+                    {error}
+                    <div className="retry-row">
+                      <Button size="sm" variant="ghost" onClick={() => setError(null)}>
+                        Dismiss
+                      </Button>
+                    </div>
+                  </Alert>
+                )}
+                <RunHeader
+                  detail={detail}
+                  events={events}
+                  running={running}
+                  stoppable={stoppable}
+                  stopping={stopping}
+                  stoppingNow={stoppingNow}
+                  restartable={restartable}
+                  resumable={resumable}
+                  resuming={resuming}
+                  onStop={() => void stopRun(detail.run_id)}
+                  onRestart={() => setRestartTarget(detail.run_id)}
+                  onResume={() => void resumeRun(detail.run_id)}
+                />
 
-              <Tabs
-                label="Run detail"
-                value={tab}
-                onChange={setTab}
-                items={[...TABS].map(t => ({
-                  ...t,
-                  badge:
-                    t.id === 'review' && detail.review?.comments?.length
-                      ? ` (${detail.review.comments.length})`
-                      : t.id === 'ui' && Object.keys(detail.ui_code ?? {}).length
-                        ? ` (${Object.keys(detail.ui_code ?? {}).length})`
-                        : undefined,
-                }))}
-              >
-                <ErrorBoundary label="This tab">
-                  {renderTab(tab, {
-                    detail,
-                    events,
-                    running,
-                    previewReload,
-                    setPreviewReload,
+                <Tabs
+                  label="Run detail"
+                  value={tab}
+                  onChange={setTab}
+                  items={[...TABS].map(t => {
+                    const count =
+                      t.id === 'review'
+                        ? (detail.review?.comments?.length ?? 0)
+                        : t.id === 'ui'
+                          ? Object.keys(detail.ui_code ?? {}).length
+                          : 0;
+                    return { ...t, badge: count > 0 ? <CountBadge count={count} /> : undefined };
                   })}
-                </ErrorBoundary>
-              </Tabs>
-            </>
-          )}
-
-          <Card label="Evaluation">
-            <h2>
-              <button
-                type="button"
-                className="linklike"
-                aria-expanded={showEvals}
-                onClick={() => setShowEvals(v => !v)}
-              >
-                {showEvals ? 'Hide' : 'Show'} evaluation
-              </button>
-            </h2>
-            {showEvals && (
-              <Suspense fallback={<PanelFallback label="evaluation" />}>
-                <EvalPanel data={evals} />
-              </Suspense>
+                >
+                  <ErrorBoundary label="This tab">
+                    {renderTab(tab, {
+                      detail,
+                      events,
+                      running,
+                      previewReload,
+                      setPreviewReload,
+                      openRun: setSelected,
+                    })}
+                  </ErrorBoundary>
+                </Tabs>
+              </>
             )}
-          </Card>
+
+            <Card label="Evaluation" className="eval-card">
+              <h2>
+                <button
+                  type="button"
+                  className="linklike"
+                  aria-expanded={showEvals}
+                  onClick={() => setShowEvals(v => !v)}
+                >
+                  <Icon name={showEvals ? 'chevron-down' : 'chevron-right'} size={16} />
+                  {showEvals ? 'Hide' : 'Show'} evaluation
+                </button>
+              </h2>
+              {showEvals && (
+                <Suspense fallback={<PanelFallback label="evaluation" />}>
+                  <EvalPanel data={evals} />
+                </Suspense>
+              )}
+            </Card>
+          </div>
         </main>
       </div>
 
@@ -644,6 +614,8 @@ interface TabContext {
   running: boolean;
   previewReload: number;
   setPreviewReload: (_fn: (_n: number) => number) => void;
+  /** Open another run (a follow-up turn) in the console. */
+  openRun: (_runId: string) => void;
 }
 
 /**
@@ -654,7 +626,7 @@ interface TabContext {
  */
 function renderTab(
   tab: Tab,
-  { detail, events, running, previewReload, setPreviewReload }: TabContext
+  { detail, events, running, previewReload, setPreviewReload, openRun }: TabContext
 ) {
   switch (tab) {
     case 'pipeline':
@@ -705,7 +677,7 @@ function renderTab(
           ).map(([title, items]) =>
             items.length ? (
               <section key={title} className="section">
-                <div className="hint caps">
+                <div className="list-title">
                   {title} ({items.length})
                 </div>
                 <ul>
@@ -729,7 +701,7 @@ function renderTab(
 
     case 'spec':
       return detail.spec ? (
-        <pre className="code">{detail.spec}</pre>
+        <CodeBlock code={detail.spec} language="yaml" fileName="openapi.yaml" />
       ) : (
         <EmptyState>No OpenAPI spec yet.</EmptyState>
       );
@@ -747,7 +719,9 @@ function renderTab(
             <Stat value={detail.report.passed} label="Passed" />
             <Stat value={detail.report.failed} label="Failed" />
           </StatGrid>
-          {detail.report.raw && <pre className="code">{detail.report.raw}</pre>}
+          {detail.report.raw && (
+            <CodeBlock code={detail.report.raw} title="pytest output" lineNumbers={false} />
+          )}
           {detail.memory.length > 0 && (
             <>
               <h3>Reflections</h3>
@@ -789,6 +763,13 @@ function renderTab(
       return (
         <Suspense fallback={<PanelFallback label="UI panel" />}>
           <UiPanel detail={detail} />
+        </Suspense>
+      );
+
+    case 'followup':
+      return (
+        <Suspense fallback={<PanelFallback label="follow-up panel" />}>
+          <FollowUpPanel detail={detail} onOpenRun={openRun} />
         </Suspense>
       );
 

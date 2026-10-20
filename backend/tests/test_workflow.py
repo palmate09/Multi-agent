@@ -125,7 +125,9 @@ def test_domain_missed_is_its_own_status(monkeypatch, tmp_path):
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
     monkeypatch.setattr(
-        designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library()
+        designer,
+        "stories_to_spec",
+        lambda s, requirement="", plan=None, want_ui=False: _spec_for_library(),
     )
     # Correct, working code — for the wrong domain entirely.
     monkeypatch.setattr(
@@ -166,7 +168,9 @@ def test_coverage_gate_runs_before_tests_are_graded(monkeypatch, tmp_path):
     from agents import designer
 
     monkeypatch.setattr(
-        designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library()
+        designer,
+        "stories_to_spec",
+        lambda s, requirement="", plan=None, want_ui=False: _spec_for_library(),
     )
     monkeypatch.setattr(
         developer,
@@ -196,13 +200,15 @@ def test_fix_loop_stops_when_patch_changes_nothing(monkeypatch, tmp_path):
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
     monkeypatch.setattr(
-        designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library()
+        designer,
+        "stories_to_spec",
+        lambda s, requirement="", plan=None, want_ui=False: _spec_for_library(),
     )
     monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
     monkeypatch.setattr(
         developer,
         "patch_code",
-        lambda code, report, refl, tests=None, kind="api": CodeBundle(
+        lambda code, report, refl, tests=None, kind="api", spec=None, note=None: CodeBundle(
             files=dict(code.files),
             entry_module=code.entry_module,
             entry_attr=code.entry_attr,
@@ -227,6 +233,59 @@ def test_fix_loop_stops_when_patch_changes_nothing(monkeypatch, tmp_path):
     assert "no change" in st.error
 
 
+def test_a_no_op_repair_is_retried_with_a_different_ask(monkeypatch, tmp_path):
+    """A retry that repeats the same prompt gets the same answer back.
+
+    A live run stopped with "the developer patch produced no change" while
+    the model was perfectly able to fix the failure. The retry has to say
+    that the last reply changed nothing.
+    """
+    from agents import designer, developer, pm, reviewer, tester
+    from graph import workflow as Workflow
+    from schemas.messages import CodeBundle, UserStories
+
+    monkeypatch.setattr(
+        pm,
+        "requirement_to_stories",
+        lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
+    )
+    monkeypatch.setattr(
+        designer,
+        "stories_to_spec",
+        lambda s, requirement="", plan=None, want_ui=False: _spec_for_library(),
+    )
+    monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
+    notes: list[str] = []
+
+    def patch(code, report, refl, tests=None, kind="api", spec=None, note=""):
+        notes.append(note or "")
+        if len(notes) == 1:
+            return code  # a no-op: the same files back
+        return CodeBundle(
+            files={**code.files, "app.py": code.files["app.py"] + "\n# fixed\n"},
+            entry_module=code.entry_module,
+            entry_attr=code.entry_attr,
+        )
+
+    monkeypatch.setattr(developer, "patch_code", patch)
+    monkeypatch.setattr(reviewer, "generate", lambda *a, **k: ("", {"ok": False}))
+    monkeypatch.setattr(
+        tester,
+        "spec_to_tests",
+        lambda *a, **k: TestSuite(files={"test_app.py": "def test_x(): assert True\n"}),
+    )
+    failing = TestReport(
+        passed=0,
+        failed=1,
+        failures=[TestFailure(name="test_app.py::test_borrow", error="boom")],
+        raw="",
+    )
+    monkeypatch.setattr(Workflow.Runner, "run_tests", lambda *a, **k: failing)
+    run_team(LIBRARY, out_dir=str(tmp_path / "noop"))
+    assert len(notes) >= 2, "the no-op was never retried"
+    assert "reproduced the current code" in notes[1], notes[1]
+
+
 def test_fix_loop_reports_llm_outage_honestly(monkeypatch, tmp_path):
     """A patch call that never reaches the model must not blame the model.
 
@@ -248,7 +307,9 @@ def test_fix_loop_reports_llm_outage_honestly(monkeypatch, tmp_path):
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
     monkeypatch.setattr(
-        designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library()
+        designer,
+        "stories_to_spec",
+        lambda s, requirement="", plan=None, want_ui=False: _spec_for_library(),
     )
     monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
     monkeypatch.setattr(developer, "patch_code", _boom)
@@ -282,13 +343,15 @@ def test_fix_loop_applies_a_real_change(monkeypatch, tmp_path):
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
     monkeypatch.setattr(
-        designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library()
+        designer,
+        "stories_to_spec",
+        lambda s, requirement="", plan=None, want_ui=False: _spec_for_library(),
     )
     monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
     monkeypatch.setattr(
         developer,
         "patch_code",
-        lambda code, report, refl, tests=None, kind="api": CodeBundle(
+        lambda code, report, refl, tests=None, kind="api", spec=None, note=None: CodeBundle(
             files={"app.py": code.files["app.py"] + "\n# patched\n"},
             entry_module=code.entry_module,
             entry_attr=code.entry_attr,
@@ -315,9 +378,19 @@ def test_fix_loop_applies_a_real_change(monkeypatch, tmp_path):
 
     monkeypatch.setattr(Workflow.Runner, "run_tests", fake_run_tests)
     monkeypatch.setattr(Workflow.Runner, "static_analysis", lambda *a, **k: ("", ""))
-    st = run_team(LIBRARY, out_dir=str(tmp_path / "real"))
+    events: list[tuple[str, str, dict]] = []
+    st = run_team(
+        LIBRARY,
+        out_dir=str(tmp_path / "real"),
+        on_event=lambda node, phase, data: events.append((node, phase, data)),
+    )
     assert st.retry_dev == 1
     assert "# patched" in (tmp_path / "real" / "code" / "app.py").read_text()
+    # The retry "start" must not be the developer's last word: the rail shows
+    # the node as stopped once the run ends unless a terminal event follows.
+    dev = [(phase, data) for node, phase, data in events if node == "developer"]
+    assert dev[-1][0] == "done", dev
+    assert dev[-1][1].get("repaired") == "code_bug", dev[-1]
 
 
 def test_boot_failure_is_reported(monkeypatch, tmp_path):
@@ -332,7 +405,9 @@ def test_boot_failure_is_reported(monkeypatch, tmp_path):
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
     monkeypatch.setattr(
-        designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library()
+        designer,
+        "stories_to_spec",
+        lambda s, requirement="", plan=None, want_ui=False: _spec_for_library(),
     )
     monkeypatch.setattr(
         developer,
@@ -342,7 +417,7 @@ def test_boot_failure_is_reported(monkeypatch, tmp_path):
     monkeypatch.setattr(
         Workflow.Runner,
         "boot_check",
-        lambda code, timeout=60, public_api=None: (
+        lambda code, timeout=60, public_api=None, web_root=False: (
             False,
             "ModuleNotFoundError: nonexistent_module_xyz",
         ),
@@ -398,7 +473,9 @@ def test_boot_failure_enters_the_fix_loop(monkeypatch, tmp_path):
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
     monkeypatch.setattr(
-        designer, "stories_to_spec", lambda s, requirement="", plan=None: _spec_for_library()
+        designer,
+        "stories_to_spec",
+        lambda s, requirement="", plan=None, want_ui=False: _spec_for_library(),
     )
     monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
     monkeypatch.setattr(
@@ -417,7 +494,7 @@ def test_boot_failure_enters_the_fix_loop(monkeypatch, tmp_path):
 
     boots = {"n": 0}
 
-    def fake_boot(code, timeout=60, public_api=None):
+    def fake_boot(code, timeout=60, public_api=None, web_root=False):
         boots["n"] += 1
         # Fails once with a fixable error, then imports.
         if boots["n"] == 1:
@@ -429,7 +506,7 @@ def test_boot_failure_enters_the_fix_loop(monkeypatch, tmp_path):
     monkeypatch.setattr(
         developer,
         "patch_code",
-        lambda code, report, refl, tests=None, kind="api": CodeBundle(
+        lambda code, report, refl, tests=None, kind="api", spec=None, note=None: CodeBundle(
             files={"app.py": code.files["app.py"] + "\n# fixed import\n"},
             entry_module=code.entry_module,
             entry_attr=code.entry_attr,
@@ -441,9 +518,17 @@ def test_boot_failure_enters_the_fix_loop(monkeypatch, tmp_path):
         lambda *a, **k: TestReport(passed=1, failed=0, failures=[], raw=""),
     )
 
-    st = run_team(LIBRARY, out_dir=str(tmp_path / "bootloop"))
+    events: list[tuple[str, str, dict]] = []
+    st = run_team(
+        LIBRARY,
+        out_dir=str(tmp_path / "bootloop"),
+        on_event=lambda node, phase, data: events.append((node, phase, data)),
+    )
     assert st.retry_dev == 1, st.status
     assert st.status == "accepted", st.status
+    dev = [(phase, data) for node, phase, data in events if node == "developer"]
+    assert dev[-1][0] == "done", dev
+    assert dev[-1][1].get("repaired") == "boot_failure", dev[-1]
 
 
 def test_cancel_event_stops_run_between_nodes(monkeypatch, tmp_path):
@@ -493,7 +578,7 @@ def test_reasoner_node_writes_its_artifact_and_hands_the_plan_on(monkeypatch, tm
 
     captured: dict = {}
 
-    def fake_designer(s, requirement="", plan=None):
+    def fake_designer(s, requirement="", plan=None, want_ui=False):
         captured["designer_plan"] = plan
         return _spec_for_library()
 
@@ -559,7 +644,7 @@ def test_skip_reasoner_ablates_the_node(monkeypatch, tmp_path):
 
     captured: dict = {}
 
-    def fake_designer(s, requirement="", plan=None):
+    def fake_designer(s, requirement="", plan=None, want_ui=False):
         captured["plan"] = plan
         return _spec_for_library()
 

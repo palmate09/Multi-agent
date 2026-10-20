@@ -283,8 +283,7 @@ def test_pytest_is_told_not_to_write_a_cache():
 # --------------------------------------------------------------------------
 def test_a_missing_dependency_is_named_rather_than_left_as_an_import_error():
     output = (
-        "ImportError while importing test module\n"
-        "ModuleNotFoundError: No module named 'pandas'\n"
+        "ImportError while importing test module\nModuleNotFoundError: No module named 'pandas'\n"
     )
     note = Runner.explain_missing_dependencies(output)
     assert "pandas" in note
@@ -417,7 +416,11 @@ def test_a_run_without_an_explicit_option_follows_sandbox_mode(monkeypatch):
 
     run = type("R", (), {"options": {}})()
     explicit = run.options.get("use_docker")
-    resolved = store.settings.sandbox_use_docker or Runner.uses_docker() if explicit is None else bool(explicit)
+    resolved = (
+        store.settings.sandbox_use_docker or Runner.uses_docker()
+        if explicit is None
+        else bool(explicit)
+    )
     assert resolved is True, "SANDBOX_MODE=container must not run pytest in the backend"
 
 
@@ -430,7 +433,9 @@ def test_an_explicit_false_still_forces_the_subprocess_path(monkeypatch):
     monkeypatch.setattr(Runner, "uses_docker", lambda: True)
     settings = Settings(sandbox_use_docker=False)
     explicit = {"use_docker": False}.get("use_docker")
-    resolved = settings.sandbox_use_docker or Runner.uses_docker() if explicit is None else bool(explicit)
+    resolved = (
+        settings.sandbox_use_docker or Runner.uses_docker() if explicit is None else bool(explicit)
+    )
     assert resolved is False
 
 
@@ -442,7 +447,9 @@ def test_subprocess_mode_stays_off():
     explicit = None
     # uses_docker() is False when SANDBOX_MODE is subprocess; the offline suite
     # pins it, so this is the branch the whole test suite runs in.
-    resolved = settings.sandbox_use_docker or Runner.uses_docker() if explicit is None else bool(explicit)
+    resolved = (
+        settings.sandbox_use_docker or Runner.uses_docker() if explicit is None else bool(explicit)
+    )
     assert resolved is False
 
 
@@ -459,9 +466,7 @@ def test_the_data_tmpfs_is_world_writable_by_construction():
     """
     from sandbox.flags import SandboxLimits, run_argv
 
-    argv = run_argv(
-        "img", ["-m", "pytest"], limits=SandboxLimits(), with_data=True
-    )
+    argv = run_argv("img", ["-m", "pytest"], limits=SandboxLimits(), with_data=True)
     data_mounts = [a for a in argv if a.startswith(SandboxLimits().data_mount + ":")]
     assert data_mounts, "no writable data mount was requested"
     assert "mode=1777" in data_mounts[0], (

@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 
+import { languageFor } from '../lib/highlight';
+import { CodeBlock } from './ui/CodeBlock';
 import { EmptyState } from './ui/Card';
+import { Icon } from './ui/Icon';
 
 interface Props {
   files: Record<string, string>;
@@ -15,24 +18,18 @@ interface Props {
  * tab stop with arrow-key movement rather than ten.
  */
 export function FileViewer({ files, emptyHint = 'No files generated.' }: Props) {
-  const [active, setActive] = useState<string>('');
-
-  // The selected file may have gone away (the Developer rewrote the
-  // layout), so fall back to the first one rather than rendering
-  // nothing.
-  useEffect(() => {
-    const names = Object.keys(files).sort();
-    if (names.length === 0) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (!names.includes(active)) setActive(names[0] ?? '');
-  }, [files, active]);
+  const [chosen, setChosen] = useState<string>('');
 
   const names = Object.keys(files).sort();
-
   if (names.length === 0) return <EmptyState>{emptyHint}</EmptyState>;
 
+  // The chosen file may have gone away (the Developer rewrote the layout), so
+  // fall back to the first one rather than rendering nothing. Derived during
+  // render, so there is no frame where the panel is empty.
+  const active = names.includes(chosen) ? chosen : names[0];
+
   return (
-    <div>
+    <div className="fileviewer">
       <div className="file-list" role="tablist" aria-label="Generated files">
         {names.map(name => {
           const selected = name === active;
@@ -46,7 +43,7 @@ export function FileViewer({ files, emptyHint = 'No files generated.' }: Props) 
               aria-controls="file-panel"
               tabIndex={selected ? 0 : -1}
               className={selected ? 'active' : ''}
-              onClick={() => setActive(name)}
+              onClick={() => setChosen(name)}
               onKeyDown={e => {
                 if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
                 e.preventDefault();
@@ -55,24 +52,26 @@ export function FileViewer({ files, emptyHint = 'No files generated.' }: Props) 
                   e.key === 'ArrowRight'
                     ? names[(i + 1) % names.length]
                     : names[(i - 1 + names.length) % names.length];
-                setActive(next);
+                setChosen(next);
                 document.getElementById(`file-${next}`)?.focus();
               }}
             >
+              <Icon name="file" size={14} />
               {name}
             </button>
           );
         })}
       </div>
-      <pre
-        className="code"
-        id="file-panel"
-        role="tabpanel"
-        aria-labelledby={`file-${active}`}
-        tabIndex={0}
-      >
-        {files[active]}
-      </pre>
+      <CodeBlock
+        code={files[active]}
+        language={languageFor(active)}
+        preProps={{
+          id: 'file-panel',
+          role: 'tabpanel',
+          'aria-labelledby': `file-${active}`,
+          tabIndex: 0,
+        }}
+      />
     </div>
   );
 }

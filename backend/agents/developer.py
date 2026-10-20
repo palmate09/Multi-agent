@@ -18,6 +18,9 @@ from agents.llm import GenerationError, require
 from agents.reasoner import plan_block
 from schemas.messages import ApiSpec, CodeBundle, Plan, TestReport, TestSuite
 
+# Where a full-stack application keeps the interface it serves at "/".
+_STATIC_INDEX = "static/index.html"
+
 _API_SOP = (
     "You are the Developer. Implement the given OpenAPI spec as a runnable "
     "FastAPI application.\n"
@@ -42,12 +45,50 @@ _API_SOP = (
     "- Every run gets its own database schema, scoped by the connection URL. Do not "
     "qualify table names with a schema, and do not create or switch schemas yourself.\n"
     "- Return error responses the spec declares (404, 422, 409...).\n"
+    "- Treat request validation as part of the contract. Use Pydantic request "
+    "models and explicit checks so malformed, missing or out-of-range input gets "
+    "the declared 4xx status, never a 500. Unknown ids are 404; declared "
+    "duplicates/conflicts are 409; FastAPI's 422 is correct for schema errors.\n"
+    "- Implement the complete lifecycle, not only the happy path: the list "
+    "endpoint returns the current collection, every mutation persists, a detail "
+    "read returns the latest state, and deletes/updates affect exactly one row.\n"
+    "- Validate path and query parameters (ids, pagination, enum values) and "
+    "return a 4xx for invalid values instead of letting them reach the database.\n"
+    "- Never return a SQLAlchemy model or a raw exception: convert rows to "
+    "response models and keep error bodies stable.\n"
     "- Import every symbol you use; do not reference an undefined name.\n"
+    "- Before answering, walk every endpoint in the spec once with a valid request "
+    "and once with an invalid one, and confirm each returns the declared status.\n"
     "- Split modules as listed in the file plan only. Do not invent extra files.\n"
     "Reply with file blocks in this exact format and no prose:\n"
     "### <filename>\n```python\n<complete code>\n```\n"
     "For the dependency list reply with one final block:\n"
     "### requirements.txt\n```\n<one package per line>\n```"
+)
+
+_FULLSTACK_RULES = (
+    "\nThis is a FULL-STACK web application. The app must serve its own web "
+    "interface at the root path, so a person can open it in a browser and use "
+    "it, and the sandbox runs exactly this process.\n"
+    "- The file plan above lists `static/index.html`: create it as a minimal, "
+    'valid HTML shell with a `<div id="root"></div>` mount point, a link to '
+    "`styles.css` and a script tag for `app.js`. The real interface is "
+    "generated separately and replaces this file, so keep it simple and "
+    "correct -- it must never be the reason the app fails to start.\n"
+    "- Import `os` and `from pathlib import Path`, and make sure the directory "
+    "exists before you mount it: `static_dir = Path(__file__).parent / "
+    '"static"` followed by `os.makedirs(static_dir, exist_ok=True)`. A mount '
+    "on a missing directory makes the whole application fail to start.\n"
+    "- Import `from fastapi.staticfiles import StaticFiles` and mount it LAST, "
+    "after every API route has been registered, so the API always wins:\n"
+    '  app.mount("/", StaticFiles(directory=str(static_dir), html=True), '
+    'name="web")\n'
+    "- `GET /` must return that HTML page with status 200. Do not register a "
+    "route on `/` yourself and do not add a catch-all JSON route: the mount "
+    "serves the page.\n"
+    "- The API paths are under `/api`, so the root mount never shadows them.\n"
+    "- Do not create any other frontend files; the interface is generated "
+    "separately into the same `static` directory.\n"
 )
 
 _PROGRAM_SOP = (
@@ -82,6 +123,10 @@ def _file_plan_block(spec: ApiSpec) -> tuple[list[str], str]:
         names.insert(0, spec.entrypoint)
     if not names:
         names = [spec.entrypoint or "main.py"]
+    if spec.kind == "fullstack" and _STATIC_INDEX not in names:
+        # The app serves its own interface, so the shell page has to exist
+        # before the mount does. The generated interface replaces this file.
+        names.append(_STATIC_INDEX)
     plan = "\n".join(f"- {n}" for n in names)
     return names, plan
 
@@ -159,13 +204,15 @@ def _require_files(files: dict[str, str], required: list[str]) -> None:
 def _api_to_code(spec: ApiSpec, plan: Plan | None = None) -> CodeBundle:
     required, plan_text = _file_plan_block(spec)
     prompt = (
-        f"OpenAPI spec:\n{spec.openapi_yaml[:6000]}\n\n"
+        f"OpenAPI spec:\n{spec.openapi_yaml[:16000]}\n\n"
         f"Files to create (exactly these):\n{plan_text}\n"
         f"Entrypoint module: {required[0]}\n" + plan_block(plan)
     )
     text, _meta = require(
         f"{prompt}Emit the file blocks.",
-        _API_SOP.format(file_plan=plan_text, entrypoint=required[0]),
+        (_API_SOP + _FULLSTACK_RULES if spec.kind == "fullstack" else _API_SOP).format(
+            file_plan=plan_text, entrypoint=required[0]
+        ),
         role="developer",
     )
     files = parse_file_blocks(text)
@@ -189,7 +236,7 @@ def _program_to_code(spec: ApiSpec, plan: Plan | None = None) -> CodeBundle:
         behaviours = []
     behaviour_lines = "\n".join(f"- {b}" for b in behaviours) or "- see the contract above"
     prompt = (
-        f"Contract:\n{spec.contract_text[:6000]}\n\n"
+        f"Contract:\n{spec.contract_text[:12000]}\n\n"
         f"Files to create (exactly these):\n{plan_text}\n"
         f"Entrypoint module: {required[0]}\n"
         f"Public names to expose:\n{public}\n"
@@ -322,12 +369,112 @@ def reflect(report: TestReport, kind: str = "api") -> str:
     return "No failures recorded; keep the current implementation."
 
 
+_CHANGE_RULES = (
+    "\nThis is a CHANGE to an application that already works. Apply the change "
+    "to the code above.\n"
+    "- Keep the behaviour the change does not touch: the same routes, the same "
+    "response shapes, the same validation and the same persistence.\n"
+    "- Add what the request asks for, in the same style and quality as the code "
+    "above.\n"
+    "- The OpenAPI contract is authoritative: every endpoint it declares must "
+    "still be implemented, and the new one must match it exactly.\n"
+    "- Reply with the COMPLETE files, not fragments and not a diff.\n"
+)
+
+#: The change prompt is assembled from the contract, the current files and the
+#: request. Hosted providers refuse a body they consider too large (HTTP 413),
+#: and a follow-up that dies there changes nothing -- so the prompt is kept
+#: inside a budget: the contract first, then the code, each file keeping its
+#: head and its tail so its imports and its routes both survive.
+_CHANGE_PROMPT_BUDGET = 22000
+_CHANGE_SPEC_BUDGET = 10000
+
+
+def _file_digest(body: str, budget: int) -> str:
+    """A file trimmed to a budget, keeping its head and its tail.
+
+    The head holds the imports and the models; the tail holds the routes.
+    Dropping the middle of a long file is the difference between a prompt the
+    provider accepts and one it refuses outright.
+    """
+    if len(body) <= budget:
+        return body
+    head = max(400, budget // 2)
+    tail = max(400, budget - head - 40)
+    return body[:head] + "\n# ... (middle omitted) ...\n" + body[-tail:]
+
+
+def apply_change(
+    code: CodeBundle,
+    spec: ApiSpec,
+    request: str,
+    tests: TestSuite | None = None,
+) -> CodeBundle:
+    """Apply one change to an app that already exists.
+
+    The current files are in the prompt, because a follow-up *edits* an app: a
+    model asked to write it from scratch produces a different app that happens
+    to answer the same endpoints, and everything the user liked about the first
+    version is gone.
+    """
+    required, plan_text = _file_plan_block(spec)
+    spec_text = spec.openapi_yaml[:_CHANGE_SPEC_BUDGET]
+    # Whatever the contract leaves of the budget goes to the current code.
+    # The entrypoint gets the larger share: its routes are what a change
+    # usually touches.
+    code_budget = max(4000, _CHANGE_PROMPT_BUDGET - len(spec_text) - 2000)
+    names = list(code.files)
+    entry_name = f"{code.entry_module}.py" if code.entry_module else ""
+    entry_share = int(code_budget * 0.45)
+    others = [n for n in names if n != entry_name]
+    other_share = max(800, (code_budget - entry_share) // len(others)) if others else 0
+
+    def digest(name: str, body: str) -> str:
+        return _file_digest(body, entry_share if name == entry_name else other_share)
+
+    current = "\n\n".join(
+        f"### {name}\n```python\n{digest(name, body)}\n```" for name, body in code.files.items()
+    )
+    # The suite itself is not sent (the Tester regenerates it from the
+    # contract); its names are, so the change does not break behaviour that
+    # is already covered.
+    covered = ""
+    if tests and tests.files:
+        names = re.findall(r"(?m)^\s*def (test_\w+)", "\n".join(tests.files.values()))
+        if names:
+            covered = "\n\nTests that must still pass: " + ", ".join(names[:40]) + "\n"
+    prompt = (
+        f"Change request:\n{request}\n\n"
+        f"OpenAPI contract (authoritative):\n{spec_text}\n\n"
+        f"Current code:\n{current}{covered}\n"
+        f"Files to create (exactly these):\n{plan_text}\n"
+    )
+    text, _meta = require(
+        f"{prompt}Emit the file blocks.",
+        (_API_SOP + _CHANGE_RULES).format(file_plan=plan_text, entrypoint=required[0]),
+        role="developer",
+    )
+    files = parse_file_blocks(text)
+    if not files:
+        raise GenerationError("Developer produced no file blocks for the change")
+    _require_files(files, required)
+    bundle = _finish(files, required, entrypoint=spec.entrypoint, kind=spec.kind)
+    if not bundle.entry_module:
+        raise GenerationError(
+            "No module in the changed bundle assigns a FastAPI() app to a module-level "
+            "name, so the application cannot be imported or tested"
+        )
+    return bundle
+
+
 def patch_code(
     code: CodeBundle,
     report: TestReport,
     reflection: str,
     tests: TestSuite | None = None,
     kind: str = "api",
+    spec: ApiSpec | None = None,
+    note: str = "",
 ) -> CodeBundle:
     """Patch the bundle for failing tests.
 
@@ -339,6 +486,12 @@ def patch_code(
     ``tests`` is passed through when available: the failure text alone does not
     show which interface the test assumed, and a model that cannot see the test
     cannot tell a code bug from a test that drives the wrong representation.
+    ``spec`` is the tie-breaker for exactly that decision: without it a repair
+    patch saw only the tests and moved a correct ``/tables`` app to an invented
+    ``/api/tables`` in order to make them pass.
+
+    ``note`` carries forward why the last attempt did not work, so a retry is
+    not a blind re-roll of the same prompt.
     """
     current = "\n\n".join(
         f"### {name}\n```python\n{body[:5000]}\n```" for name, body in code.files.items()
@@ -354,13 +507,27 @@ def patch_code(
     # model needs to locate the cause, so it travels with the patch request.
     raw_tail = (report.raw or "").strip()[-1600:]
     trace_block = f"\n\nTest runner output (tail):\n{raw_tail}\n" if raw_tail else ""
+    spec_block = ""
+    if spec is not None:
+        if getattr(spec, "openapi_yaml", ""):
+            spec_block = (
+                "\n\nThe OpenAPI contract below is authoritative. Never add, remove or "
+                "rename a path, HTTP method, status code or response field to match a "
+                "test that contradicts it; fix the implementation instead.\n"
+                f"{spec.openapi_yaml[:16000]}\n"
+            )
+        elif getattr(spec, "contract_text", ""):
+            spec_block = (
+                "\n\nThe program contract below is authoritative. Do not invent methods "
+                "or change the public API to match a test that contradicts it; fix the "
+                "implementation instead.\n"
+                f"{spec.contract_text[:12000]}\n"
+            )
     tail = (
         "Reply with ONLY the file blocks you changed, complete and runnable. "
-        "Change only what fixes the failures. No prose. If the test drives an "
-        "interface the contract does not declare, make the code expose that "
-        "interface rather than assuming the test is wrong. This is a plain "
-        "Python program, not a web service: never add FastAPI, Flask, or "
-        "SQLAlchemy to fix a test failure."
+        "Change only what fixes the failures. No prose. This is a plain Python "
+        "program, not a web service: never add FastAPI, Flask, or SQLAlchemy to "
+        "fix a test failure."
         if kind == "program"
         else "Reply with ONLY the file blocks you changed, complete and runnable. "
         "Change only what fixes the failures. No prose. Remember: the tables must be "
@@ -370,8 +537,8 @@ def patch_code(
     )
     try:
         text, _meta = require(
-            f"Reflection: {reflection}\n\nFailing tests:\n{failures}\n{trace_block}\n"
-            f"Current code:\n{current}{test_block}\n\n" + tail,
+            f"Reflection: {reflection}\n\nFailing tests:\n{failures}\n{trace_block}"
+            f"{spec_block}\nCurrent code:\n{current}{test_block}\n\n{note}" + tail,
             (_PROGRAM_SOP if kind == "program" else SOP).format(
                 file_plan="\n- " + "\n- ".join(sorted(code.files)),
                 entrypoint=code.entry_module or "",
@@ -382,9 +549,13 @@ def patch_code(
         )
     except GenerationError:
         return code
-    if not text or "def " not in text:
+    if not text:
         return code
     patched = parse_file_blocks(text)
+    if not patched:
+        # No file blocks: the reply was prose, or a diff the parser cannot
+        # read. Nothing to merge.
+        return code
     merged = dict(code.files)
     merged.update({k: v for k, v in patched.items() if v.strip()})
     if merged == code.files:

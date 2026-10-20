@@ -9,7 +9,11 @@ interface Props {
 }
 
 /**
- * The generated UI: its contract, its files, and the gate's verdict.
+ * The generated interface: its contract, its files, and the gate's verdict.
+ *
+ * For a full-stack run these files are part of the application itself — the
+ * app serves them at "/" — so the panel shows the same thing the person will
+ * see in the Playground.
  *
  * The check rows are styled after the domain-coverage alert on
  * purpose — both are advisory verdicts about generated code, and a
@@ -26,50 +30,52 @@ export function UiPanel({ detail }: Props) {
       <EmptyState
         action={
           <>
-            Tick <strong>Generate a web UI</strong> on a new run
+            Tick <strong>Also build a web app</strong> on a new run
           </>
         }
       >
-        No UI generated. Tick <strong>Generate a web UI</strong> on a new run to get a static page
-        bound to the generated API.
+        No interface generated. A plain request already gets one; tick{' '}
+        <strong>Also build a web app</strong> to add it to a request that names only a backend.
       </EmptyState>
     );
   }
 
   return (
-    <div>
+    <div className="panel-stack">
       {spec && (
         <Card label="UI contract">
           <h3>Contract</h3>
-          <div className="section">
-            <div className="hint caps">Pages ({spec.pages.length})</div>
-            <ul>
-              {spec.pages.map(p => (
-                <li key={p}>
-                  <code>{p}</code>
-                </li>
-              ))}
-            </ul>
-          </div>
-          {spec.components.length > 0 && (
+          <div className="contract-grid">
             <div className="section">
-              <div className="hint caps">Components ({spec.components.length})</div>
+              <div className="list-title">Pages ({spec.pages.length})</div>
               <ul>
-                {spec.components.map(c => (
-                  <li key={c}>{c}</li>
+                {spec.pages.map(p => (
+                  <li key={p}>
+                    <code>{p}</code>
+                  </li>
                 ))}
               </ul>
             </div>
-          )}
-          <div className="section">
-            <div className="hint caps">Data bindings ({spec.data_bindings.length})</div>
-            <ul>
-              {spec.data_bindings.map(b => (
-                <li key={b}>
-                  <code>{b}</code>
-                </li>
-              ))}
-            </ul>
+            {spec.components.length > 0 && (
+              <div className="section">
+                <div className="list-title">Components ({spec.components.length})</div>
+                <ul>
+                  {spec.components.map(c => (
+                    <li key={c}>{c}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <div className="section">
+              <div className="list-title">Data bindings ({spec.data_bindings.length})</div>
+              <ul>
+                {spec.data_bindings.map(b => (
+                  <li key={b}>
+                    <code>{b}</code>
+                  </li>
+                ))}
+              </ul>
+            </div>
           </div>
         </Card>
       )}
@@ -77,7 +83,7 @@ export function UiPanel({ detail }: Props) {
       {report && (
         <Card label="UI gate">
           <h3>Gate</h3>
-          <Alert tone={report.ok ? 'note' : 'error'}>
+          <Alert tone={report.ok ? 'success' : 'warning'}>
             {report.ok
               ? 'All static UI checks passed.'
               : `${report.checks.filter(c => !c.ok).length} of ${

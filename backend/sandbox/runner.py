@@ -330,8 +330,9 @@ def run_tests_local(code: CodeBundle, tests: TestSuite, timeout: int = 60) -> Te
     with _bundle_dir("agent-team-") as tmp:
         try:
             write_bundle(code, tests, tmp)
-            p = subprocess.run([PY, *PYTEST_ARGS], cwd=tmp,
-                               capture_output=True, text=True, timeout=timeout)
+            p = subprocess.run(
+                [PY, *PYTEST_ARGS], cwd=tmp, capture_output=True, text=True, timeout=timeout
+            )
             output = p.stdout + "\n" + p.stderr
             return _annotate(_parse_pytest(output), output, _importable_modules(code))
         except subprocess.TimeoutExpired:
@@ -532,12 +533,11 @@ if import_errors:
 """
 
 
-
-
 def boot_check(
     code: CodeBundle,
     timeout: int = 60,
     public_api: list[str] | None = None,
+    web_root: bool = False,
 ) -> tuple[bool, str]:
     """Import the generated code and confirm its entry point is usable.
 
@@ -548,14 +548,19 @@ def boot_check(
 
     Passing ``public_api`` switches the check from "exposes a FastAPI app" to
     "exposes these declared names", which is what a non-service project needs.
+
+    ``web_root`` asks the harder question a full-stack application has to
+    answer: does it actually serve a page at ``/``? An app that imports
+    cleanly but never mounts its interface is a backend wearing a full-stack
+    label, and the person opening the preview would see a 404.
     """
     if public_api:
         modules = _importable_modules(code)
         if not modules:
             return False, "no importable python module in the bundle"
-        probe = _PROGRAM_PROBE.replace(
-            "__WANTED__", repr(list(public_api))
-        ).replace("__MODS__", repr(modules))
+        probe = _PROGRAM_PROBE.replace("__WANTED__", repr(list(public_api))).replace(
+            "__MODS__", repr(modules)
+        )
     else:
         found = find_app_object(code.files)
         if not found:
@@ -567,6 +572,21 @@ def boot_check(
             f"assert a is not None, 'module has no {attr}'; "
             f"print('boot-ok', type(a).__name__)"
         )
+        if web_root:
+            probe = (
+                f"import {module} as _m; "
+                f"a = getattr(_m, {attr!r}, None); "
+                "assert a is not None, 'module has no " + attr + "'; "
+                "from fastapi.testclient import TestClient; "
+                "_c = TestClient(a); "
+                "_r = _c.get('/'); "
+                "assert _r.status_code == 200, "
+                "'the application did not serve a page at / (status ' "
+                "+ str(_r.status_code) + ')'; "
+                "assert 'text/html' in _r.headers.get('content-type', ''), "
+                "'GET / did not return an HTML page'; "
+                "print('boot-ok', type(a).__name__)"
+            )
 
     with _bundle_dir("agent-boot-") as tmp:
         try:
@@ -643,7 +663,6 @@ def _exec_in_container(py_args: list[str], workdir: Path, timeout: int) -> str:
         return Docker.run_container(argv, timeout=timeout, mount=str(workdir)).output
 
 
-
 def _importable_modules(code: CodeBundle) -> list[str]:
     """Dotted module names for each generated file, package-style where needed."""
     out: list[str] = []
@@ -677,11 +696,22 @@ def static_analysis(code: CodeBundle) -> tuple[str, str]:
                 ruff_out = _exec_in_container(["-m", "ruff", "check", "."], tmp, 60)
                 bandit_out = _exec_in_container(["-m", "bandit", "-q", "-r", "."], tmp, 60)
                 return ruff_out[-2000:], bandit_out[-2000:]
-            r = subprocess.run([PY, "-m", "ruff", "check", "."], cwd=tmp, capture_output=True, text=True, timeout=30)
+            r = subprocess.run(
+                [PY, "-m", "ruff", "check", "."],
+                cwd=tmp,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
             ruff_out = (r.stdout + r.stderr)[-2000:]
-            b = subprocess.run([PY, "-m", "bandit", "-q", "-r", "."], cwd=tmp, capture_output=True, text=True, timeout=30)
+            b = subprocess.run(
+                [PY, "-m", "bandit", "-q", "-r", "."],
+                cwd=tmp,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
             bandit_out = (b.stdout + b.stderr)[-2000:]
             return ruff_out, bandit_out
         except Exception as e:
             return str(e), ""
-

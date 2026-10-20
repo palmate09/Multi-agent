@@ -109,7 +109,7 @@ def _offline(monkeypatch):
     monkeypatch.setattr(
         designer,
         "stories_to_spec",
-        lambda stories, requirement="", plan=None: ApiSpec(
+        lambda stories, requirement="", plan=None, want_ui=False: ApiSpec(
             openapi_yaml=SPEC_YAML,
             endpoints=["/recipes", "/health"],
             entrypoint="main.py",
@@ -134,12 +134,14 @@ def _offline(monkeypatch):
     monkeypatch.setattr(
         ui,
         "design_ui",
-        lambda s, stories=None, attempts=3: UiSpec.model_validate_json(UI_SPEC_JSON),
+        lambda s, stories=None, attempts=3, followup="": UiSpec.model_validate_json(UI_SPEC_JSON),
     )
     monkeypatch.setattr(
         ui,
         "build_ui",
-        lambda s, stories, us, entry_module="", entry_attr="": CodeBundle(files=dict(UI_FILES)),
+        lambda s, stories, us, entry_module="", entry_attr="", followup="": CodeBundle(
+            files=dict(UI_FILES)
+        ),
     )
 
 

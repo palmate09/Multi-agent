@@ -112,6 +112,4 @@ def with_schema(dsn: str, schema: str) -> str:
     if not parts.scheme.startswith("postgres"):
         return dsn
     query = quote(f"-csearch_path={schema}", safe="")
-    return urlunsplit(
-        (parts.scheme, parts.netloc, parts.path, f"options={query}", parts.fragment)
-    )
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, f"options={query}", parts.fragment))

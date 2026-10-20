@@ -46,3 +46,17 @@ export function formatClock(iso: string): string {
     hour12: false,
   });
 }
+
+/**
+ * "12s", "2m 05s". For how long a pipeline stage worked, where a bare number
+ * of seconds stops being readable once a stage retries a few times.
+ */
+export function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '—';
+  if (seconds < 1) return '<1s';
+  const total = Math.round(seconds);
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  const rest = total % 60;
+  return `${minutes}m ${String(rest).padStart(2, '0')}s`;
+}

@@ -4,6 +4,7 @@ The central regression under test is that a failed generation must raise rather
 than substitute a fixed task-manager answer.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -100,6 +101,143 @@ paths:
     assert spec.entrypoint == "service.py"
     assert spec.files == ["service.py", "models.py"]
     assert "/loans" in spec.endpoints
+
+
+def test_designer_treats_a_bare_ask_as_a_full_stack_app(monkeypatch):
+    """A plain "build me a counter" is an app, not a bag of endpoints."""
+    seen = {}
+
+    def spy(prompt, *a, **k):
+        seen["prompt"] = prompt
+        return (
+            "```yaml\nopenapi: 3.1.0\ninfo: {title: C, version: 1.0.0}\npaths:\n"
+            "  /api/counter:\n    get:\n      responses: {'200': {description: ok}}\n"
+            '```\n```json\n{"entrypoint": "main.py", "files": ["main.py"]}\n```',
+            {"ok": True},
+        )
+
+    monkeypatch.setattr(designer, "require", spy)
+    spec = designer.stories_to_spec(_stories(), requirement="Build a counter")
+    assert spec.kind == "fullstack"
+    # The backend of a full-stack app namespaces its paths, so the interface
+    # the app serves at "/" can never collide with them.
+    assert "/api" in seen["prompt"]
+    assert "FULL-STACK" in seen["prompt"]
+
+
+def test_designer_keeps_an_explicit_api_request_an_api(monkeypatch):
+    monkeypatch.setattr(
+        designer,
+        "require",
+        lambda *a, **k: (
+            "```yaml\nopenapi: 3.1.0\ninfo: {title: L, version: 1.0.0}\npaths:\n"
+            "  /loans:\n    post:\n      responses: {'201': {description: ok}}\n```",
+            {"ok": True},
+        ),
+    )
+    spec = designer.stories_to_spec(
+        _stories(), requirement="Build a REST API for a library that lends books"
+    )
+    assert spec.kind == "api"
+
+
+def test_designer_repairs_a_null_body_and_null_description():
+    """The two slips that made strict validation kill a whole run."""
+    spec = (
+        "openapi: 3.1.0\n"
+        "info: {title: L, version: 1.0.0}\n"
+        "paths:\n"
+        "  /loans:\n"
+        "    post:\n"
+        "      responses:\n"
+        "        '201':\n"
+        "          description: null\n"
+        "          content:\n"
+        "            application/json: null\n"
+    )
+    repaired = designer._repair_openapi(spec)
+    ok, why = designer._valid(repaired)
+    assert ok, why
+
+
+def test_designer_tells_the_model_why_the_document_was_rejected(monkeypatch):
+    """A blind re-roll produced the same rejected document three times."""
+    seen: list[str] = []
+
+    def spy(prompt, *a, **k):
+        seen.append(prompt)
+        if len(seen) == 1:
+            return (
+                "```yaml\nopenapi: 3.1.0\ninfo: {title: L, version: 1.0.0}\npaths:\n"
+                "  /loans:\n    post:\n      responses:\n        '201':\n"
+                "          description: null\n"
+                "          content:\n            application/json: null\n```",
+                {"ok": True},
+            )
+        return (
+            "```yaml\nopenapi: 3.1.0\ninfo: {title: L, version: 1.0.0}\npaths:\n"
+            "  /loans:\n    post:\n      responses:\n        '201':\n"
+            "          description: ok\n```",
+            {"ok": True},
+        )
+
+    monkeypatch.setattr(designer, "require", spy)
+    spec = designer.stories_to_spec(
+        _stories(), requirement="Build a REST API for a library that lends books"
+    )
+    assert spec.kind == "api"
+    assert len(seen) == 1, "the null body should have been repaired, not re-asked for"
+
+
+def test_designer_feeds_the_rejection_back_into_the_next_attempt(monkeypatch):
+    """The retry has to say what was wrong, or it is a blind re-roll."""
+    seen: list[str] = []
+
+    def spy(prompt, *a, **k):
+        seen.append(prompt)
+        if len(seen) == 1:
+            return (
+                "```yaml\nopenapi: 3.1.0\ninfo: {title: L, version: 1.0.0}\npaths: {}\n```",
+                {"ok": True},
+            )
+        return (
+            "```yaml\nopenapi: 3.1.0\ninfo: {title: L, version: 1.0.0}\npaths:\n"
+            "  /loans:\n    post:\n      responses:\n        '201':\n"
+            "          description: ok\n```",
+            {"ok": True},
+        )
+
+    monkeypatch.setattr(designer, "require", spy)
+    spec = designer.stories_to_spec(
+        _stories(), requirement="Build a REST API for a library that lends books"
+    )
+    assert spec.kind == "api"
+    assert len(seen) == 2
+    assert "was rejected" in seen[1]
+    assert "missing or empty" in seen[1]
+
+
+def test_developer_makes_a_full_stack_app_serve_its_own_page(monkeypatch):
+    """The app hosts its interface, so the sandbox runs the product itself."""
+    seen = {}
+
+    def spy(prompt, system, *a, **k):
+        seen["prompt"] = prompt
+        seen["system"] = system
+        return (APP_REPLY.replace("app.py", "main.py"), {"ok": True})
+
+    monkeypatch.setattr(developer, "require", spy)
+    spec = ApiSpec(
+        openapi_yaml="openapi: 3.1.0\npaths:\n  /api/counter:\n    get: {}\n",
+        entrypoint="main.py",
+        files=["main.py"],
+        kind="fullstack",
+    )
+    developer.spec_to_code(spec)
+    assert "StaticFiles" in seen["system"]
+    assert "static/index.html" in seen["system"]
+    # The shell page is part of the plan, so the model is told to create it.
+    assert "static/index.html" in seen["prompt"]
 
 
 def test_designer_defaults_plan_when_model_omits_it(monkeypatch):
@@ -218,6 +356,57 @@ def test_patch_prompt_contains_current_code(monkeypatch):
     assert "MARKER_SOURCE_LINE" in seen["prompt"]
 
 
+def test_patch_prompt_carries_the_contract_as_authority(monkeypatch):
+    from schemas.messages import ApiSpec, CodeBundle, TestFailure, TestReport
+
+    seen = {}
+
+    def spy(prompt, *a, **k):
+        seen["prompt"] = prompt
+        return (APP_REPLY, {"ok": True})
+
+    monkeypatch.setattr(developer, "require", spy)
+    code = CodeBundle(files={"app.py": "x = 1"}, entry_module="app", entry_attr="app")
+    spec = ApiSpec(
+        openapi_yaml="openapi: 3.1.0\npaths:\n  /items:\n    get:\n      responses: {'200': {description: ok}}\n"
+    )
+    developer.patch_code(
+        code,
+        TestReport(passed=0, failed=1, failures=[TestFailure(name="t", error="e")]),
+        "a reflection",
+        spec=spec,
+    )
+    prompt = seen["prompt"]
+    assert "authoritative" in prompt
+    assert "/items" in prompt
+
+
+def test_patch_keeps_a_reply_that_only_replaces_a_class_module(monkeypatch):
+    """A repair that only rewrites models.py is a repair.
+
+    The reply was discarded whenever it contained no "def " — which is exactly
+    what a models.py or schemas.py rewrite looks like. The run then reported
+    "the developer patch produced no change" and died with the original
+    NameError still there.
+    """
+    from schemas.messages import CodeBundle, TestFailure, TestReport
+
+    reply = "### models.py\n```python\nfrom database import engine\nclass Habit:\n    pass\n```"
+    monkeypatch.setattr(developer, "require", lambda *a, **k: (reply, {"ok": True}))
+    code = CodeBundle(
+        files={"models.py": "class Habit:\n    pass\n", "app.py": "x = 1"},
+        entry_module="app",
+        entry_attr="app",
+    )
+    out = developer.patch_code(
+        code,
+        TestReport(passed=0, failed=1, failures=[TestFailure(name="t", error="e")]),
+        "a reflection",
+    )
+    assert out.files["models.py"] != code.files["models.py"]
+    assert "from database import engine" in out.files["models.py"]
+
+
 def test_patch_returns_original_when_llm_fails(monkeypatch):
     from schemas.messages import CodeBundle, TestFailure, TestReport
 
@@ -241,11 +430,18 @@ def test_developer_has_no_template_bundle():
 def test_tester_prompt_names_the_discovered_entrypoint(monkeypatch):
     seen = {}
 
-    def spy(prompt, *a, **k):
+    def spy(prompt, system, *a, **k):
         seen["prompt"] = prompt
+        seen["system"] = system
+        body = "\n".join(
+            f"def test_h{i}():\n"
+            f"    assert TestClient(service.app).get('/health').status_code == 200"
+            for i in range(8)
+        )
         return (
             "```python\nimport service\nfrom fastapi.testclient import TestClient\n"
-            "def test_h():\n    assert TestClient(service.app).get('/health').status_code == 200\n```",
+            + body
+            + "\n```",
             {"ok": True},
         )
 
@@ -254,6 +450,69 @@ def test_tester_prompt_names_the_discovered_entrypoint(monkeypatch):
         ApiSpec(openapi_yaml="openapi: 3.1.0"), _stories(), entry_module="service", entry_attr="app"
     )
     assert "service" in seen["prompt"]
+    assert "at least 8 test functions" in seen["system"]
+
+
+def _suite(n: int, module: str = "app", path: str = "/x") -> str:
+    body = "\n".join(
+        f"def test_{i}():\n"
+        f'    assert TestClient({module}.app).get("{path}").status_code in (200, 404)'
+        for i in range(n)
+    )
+    return (
+        f"```python\nimport {module}\nfrom fastapi.testclient import TestClient\n" + body + "\n```"
+    )
+
+
+def test_tester_retries_a_thin_suite_then_accepts(monkeypatch):
+    replies = iter([_suite(2), _suite(8)])
+    calls = {"n": 0}
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        return (next(replies), {"ok": True})
+
+    monkeypatch.setattr(tester, "require", flaky)
+    suite = tester.spec_to_tests(
+        ApiSpec(openapi_yaml="openapi: 3.1.0"), _stories(), entry_module="app"
+    )
+    assert calls["n"] == 2
+    assert suite.files["test_app.py"].count("def test_") == 8
+
+
+def test_tester_rejects_a_suite_that_stays_thin(monkeypatch):
+    monkeypatch.setattr(tester, "require", lambda *a, **k: (_suite(2), {"ok": True}))
+    with pytest.raises(llm.GenerationError, match="at least 8"):
+        tester.spec_to_tests(ApiSpec(openapi_yaml="openapi: 3.1.0"), _stories(), entry_module="app")
+
+
+_RECIPES_SPEC = (
+    "openapi: 3.1.0\npaths:\n  /recipes:\n    get:\n      responses: {'200': {description: ok}}\n"
+)
+
+
+def test_tester_rejects_paths_under_an_invented_prefix(monkeypatch):
+    """The suite must not move the contract: /api/recipes is not /recipes."""
+    monkeypatch.setattr(
+        tester, "require", lambda *a, **k: (_suite(8, path="/api/recipes"), {"ok": True})
+    )
+    with pytest.raises(llm.GenerationError, match="undeclared prefix"):
+        tester.spec_to_tests(ApiSpec(openapi_yaml=_RECIPES_SPEC), _stories(), entry_module="app")
+
+
+def test_tester_accepts_the_specs_exact_paths(monkeypatch):
+    monkeypatch.setattr(
+        tester, "require", lambda *a, **k: (_suite(8, path="/recipes"), {"ok": True})
+    )
+    suite = tester.spec_to_tests(
+        ApiSpec(openapi_yaml=_RECIPES_SPEC), _stories(), entry_module="app"
+    )
+    assert '"/recipes"' in suite.files["test_app.py"]
+
+
+def test_path_check_ignores_filesystem_literals():
+    body = 'DB_PATH = "/tmp/test.db"\nresp = client.get("/recipes")\n'
+    assert tester._invented_path_roots(body, {"/recipes"}) == []
 
 
 def test_tester_rejects_a_self_testing_suite(monkeypatch):
@@ -317,6 +576,48 @@ def test_pm_retries_once_on_unparseable_json(monkeypatch):
     monkeypatch.setattr(pm, "require", flaky)
     assert pm.requirement_to_stories("x").stories[0].title == "T"
     assert calls["n"] == 2
+
+
+def _pm_reply(n: int, complexity: str, analysis: str = "Actors, entities and rules.") -> str:
+    stories = [
+        {
+            "id": f"US{i}",
+            "title": f"Capability {i}",
+            "acceptance": ["GET /items returns 200"],
+        }
+        for i in range(1, n + 1)
+    ]
+    return json.dumps({"analysis": analysis, "complexity": complexity, "stories": stories})
+
+
+def test_pm_parses_complexity_and_analysis(monkeypatch):
+    monkeypatch.setattr(pm, "require", lambda *a, **k: (_pm_reply(6, "Medium"), {"ok": True}))
+    stories = pm.requirement_to_stories("a recipe manager")
+    assert stories.complexity == "moderate"
+    assert stories.analysis == "Actors, entities and rules."
+    assert len(stories.stories) == 6
+
+
+def test_pm_retries_when_story_count_ignores_complexity(monkeypatch):
+    replies = iter([_pm_reply(5, "complex"), _pm_reply(12, "complex")])
+    calls = {"n": 0}
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        return (next(replies), {"ok": True})
+
+    monkeypatch.setattr(pm, "require", flaky)
+    stories = pm.requirement_to_stories("a bookings platform")
+    assert calls["n"] == 2
+    assert len(stories.stories) == 12
+    assert stories.complexity == "complex"
+
+
+def test_pm_accepts_a_simple_requirement_with_few_stories(monkeypatch):
+    monkeypatch.setattr(pm, "require", lambda *a, **k: (_pm_reply(3, "simple"), {"ok": True}))
+    stories = pm.requirement_to_stories("a counter API")
+    assert len(stories.stories) == 3
+    assert stories.complexity == "simple"
 
 
 # ------------------------------------------------------------- lint repair ---
@@ -440,11 +741,7 @@ def test_tester_prompt_forbids_over_specified_error_bodies(monkeypatch):
 
     def spy(prompt, *a, **k):
         seen["prompt"] = prompt
-        return (
-            "```python\nimport app\nfrom fastapi.testclient import TestClient\n"
-            "def test_h():\n    assert TestClient(app.app).get('/health').status_code == 200\n```",
-            {"ok": True},
-        )
+        return (_suite(8), {"ok": True})
 
     monkeypatch.setattr(tester, "require", spy)
     tester.spec_to_tests(

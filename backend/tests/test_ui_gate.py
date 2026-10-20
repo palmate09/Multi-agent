@@ -28,9 +28,12 @@ SPEC_YAML = (
 )
 
 GOOD_HTML = (
-    '<!doctype html>\n<html><head><link rel="stylesheet" href="styles.css">'
+    '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width, initial-scale=1">'
+    "<title>Recipes</title>"
+    '<link rel="stylesheet" href="styles.css">'
     '<script src="app.js" defer></script></head>'
-    '<body><div id="root"></div></body></html>'
+    '<body><header><h1>Recipes</h1></header><main id="root"></main></body></html>'
 )
 GOOD_JS = (
     "async function load() {\n"
@@ -46,7 +49,20 @@ GOOD_JS = (
     "}\n"
     "load();\n"
 )
-GOOD_CSS = "body { font-family: system-ui; }"
+GOOD_CSS = (
+    ":root {\n"
+    "  --bg: #f7f6f3;\n"
+    "  --surface: #ffffff;\n"
+    "  --text: #1b1c1f;\n"
+    "  --accent: #2563eb;\n"
+    "  --border: #e4e2dc;\n"
+    "  --radius: 14px;\n"
+    "}\n"
+    "body { font-family: system-ui; background: var(--bg); color: var(--text); }\n"
+    "button:hover { filter: brightness(0.95); }\n"
+    "button:focus-visible { outline: 2px solid var(--accent); }\n"
+    "@media (max-width: 640px) { body { padding: 12px; } }\n"
+)
 
 GOOD_FILES = {"index.html": GOOD_HTML, "app.js": GOOD_JS, "styles.css": GOOD_CSS}
 GOOD_SPEC = UiSpec(
@@ -70,7 +86,7 @@ def _check(report, name):
 def test_all_checks_pass_on_a_good_ui(api_spec):
     report = ui.gate(api_spec, GOOD_SPEC, GOOD_FILES)
     assert report.ok, [c.detail for c in report.failures]
-    assert len(report.checks) == 7
+    assert len(report.checks) == 16
 
 
 def test_missing_file_is_reported(api_spec):
@@ -154,6 +170,93 @@ def test_missing_script_tag_is_caught(api_spec):
     html = GOOD_HTML.replace('<script src="app.js" defer></script>', "")
     report = ui.gate(api_spec, GOOD_SPEC, {**GOOD_FILES, "index.html": html})
     assert not _check(report, "no_mount").ok
+
+
+def test_missing_viewport_meta_is_reported(api_spec):
+    html = GOOD_HTML.replace(
+        '<meta name="viewport" content="width=device-width, initial-scale=1">', ""
+    )
+    report = ui.gate(api_spec, GOOD_SPEC, {**GOOD_FILES, "index.html": html})
+    assert not _check(report, "viewport_meta").ok
+
+
+def test_missing_title_is_reported(api_spec):
+    html = GOOD_HTML.replace("<title>Recipes</title>", "")
+    report = ui.gate(api_spec, GOOD_SPEC, {**GOOD_FILES, "index.html": html})
+    assert not _check(report, "html_title").ok
+
+
+def test_unlinked_stylesheet_is_reported(api_spec):
+    html = GOOD_HTML.replace('<link rel="stylesheet" href="styles.css">', "")
+    report = ui.gate(api_spec, GOOD_SPEC, {**GOOD_FILES, "index.html": html})
+    assert not _check(report, "stylesheet_link").ok
+
+
+def test_css_without_design_tokens_is_reported(api_spec):
+    report = ui.gate(api_spec, GOOD_SPEC, {**GOOD_FILES, "styles.css": "body { margin: 0; }"})
+    assert not _check(report, "design_tokens").ok
+
+
+def test_missing_responsive_breakpoint_is_reported(api_spec):
+    css = GOOD_CSS.replace("@media (max-width: 640px) { body { padding: 12px; } }", "")
+    report = ui.gate(api_spec, GOOD_SPEC, {**GOOD_FILES, "styles.css": css})
+    assert not _check(report, "responsive_css").ok
+
+
+def test_missing_focus_styles_are_reported(api_spec):
+    css = GOOD_CSS.replace("button:focus-visible { outline: 2px solid var(--accent); }", "")
+    report = ui.gate(api_spec, GOOD_SPEC, {**GOOD_FILES, "styles.css": css})
+    assert not _check(report, "focus_states").ok
+
+
+def test_an_interface_that_never_renders_is_reported(api_spec):
+    """The blank-page failure: helpers are defined, nothing ever calls them.
+
+    A real run produced exactly this -- the page loaded with the right title
+    and CSS, and the body stayed empty, so the preview showed a white frame
+    with no error anywhere.
+    """
+    js = (
+        "function createRow(item) {\n"
+        "  const li = document.createElement('li');\n"
+        "  li.textContent = item.title;\n"
+        "  return li;\n"
+        "}\n"
+        "async function load() {\n"
+        "  const res = await fetch('recipes');\n"
+        "  const data = await res.json();\n"
+        "  for (const r of data) {\n"
+        "    document.getElementById('root').appendChild(createRow(r));\n"
+        "  }\n"
+        "}\n"
+    )
+    report = ui.gate(api_spec, GOOD_SPEC, {**GOOD_FILES, "app.js": js})
+    assert not _check(report, "renders_on_load").ok
+    assert "never starts" in _check(report, "renders_on_load").detail
+
+
+def test_a_mount_id_mismatch_is_reported(api_spec):
+    """The HTML declares #root and the script renders into #app: nothing shows."""
+    js = GOOD_JS.replace("getElementById('root')", "getElementById('app')")
+    report = ui.gate(api_spec, GOOD_SPEC, {**GOOD_FILES, "app.js": js})
+    assert not _check(report, "renders_on_load").ok
+
+
+def test_outdated_and_crude_javascript_is_reported(api_spec):
+    js = "var root = document.getElementById('root');\nalert('hi');\n"
+    report = ui.gate(api_spec, GOOD_SPEC, {**GOOD_FILES, "app.js": js})
+    check = _check(report, "modern_js")
+    assert not check.ok
+    assert "var" in check.detail
+    assert "alert(" in check.detail
+
+
+def test_a_page_without_landmarks_is_reported(api_spec):
+    html = GOOD_HTML.replace(
+        '<header><h1>Recipes</h1></header><main id="root"></main>', '<div id="root"></div>'
+    )
+    report = ui.gate(api_spec, GOOD_SPEC, {**GOOD_FILES, "index.html": html})
+    assert not _check(report, "semantic_html").ok
 
 
 def test_path_parameters_match_regardless_of_name(api_spec):

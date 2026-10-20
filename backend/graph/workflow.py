@@ -95,15 +95,19 @@ def _write_code(out: Path, code) -> None:
         p.write_text(content)
 
 
-def _write_ui_code(out: Path, code) -> None:
-    """UI files live under ``ui/`` so the preview can copy them verbatim.
+def _write_ui_code(out: Path, code, into_static: bool = False) -> None:
+    """Write the interface files.
 
-    Kept out of ``code/`` on purpose: the runner only ever imports ``.py`` from
-    there, and dropping HTML into a directory the pipeline treats as the Python
-    package would put a stray ``test_tasks.py`` next to a real module.
+    For a full-stack application they go into ``code/static/``, because the
+    generated application serves them itself: the sandbox runs one process,
+    and that process is the product. For a service with a separate preview page
+    they stay under ``ui/`` so the preview can copy them verbatim — kept out
+    of ``code/`` on purpose, since the runner only ever imports ``.py`` from
+    there.
     """
+    root = out / "code" / "static" if into_static else out / "ui"
     for rel, content in code.files.items():
-        p = out / "ui" / rel
+        p = root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
 
@@ -211,8 +215,12 @@ def reconstruct_state(run_dir: str | Path) -> GraphState:
             st.ui_spec = UiSpec.model_validate(ui_contract)
 
     ui_files: dict[str, str] = {}
-    ui_root = root / "ui"
-    if ui_root.is_dir():
+    # A full-stack application keeps its interface inside the app package
+    # (``code/static/``), because the app serves it; a service with a separate
+    # preview page keeps it in ``ui/``. Read whichever exists.
+    for ui_root in (root / "ui", root / "code" / "static"):
+        if not ui_root.is_dir():
+            continue
         for p in sorted(ui_root.rglob("*")):
             if p.is_file():
                 try:
@@ -276,6 +284,8 @@ def _finish(out: Path, st, t0: float, emit) -> None:
     summary = {
         "status": st.status,
         "error": st.error or None,
+        # What the run produced: a full-stack app, a service or a program.
+        "kind": getattr(st.spec, "kind", None),
         "tests_passed": st.report.passed if st.report else 0,
         "tests_failed": st.report.failed if st.report else 0,
         "attempts_dev": st.retry_dev,
@@ -310,6 +320,8 @@ def run_team(
     run_id: str | None = None,
     cancel: threading.Event | None = None,
     resume: GraphState | None = None,
+    followup: str = "",
+    followup_of: str = "",
 ) -> object:
     """Execute the full pipeline, streaming progress through ``on_event``.
 
@@ -328,6 +340,12 @@ def run_team(
     ``resume`` continues a previous run from its saved artifacts (see
     ``reconstruct_state``): phases with artifacts are skipped, the coverage
     gate and boot check always re-run, retry budgets start fresh.
+
+    ``followup`` makes this run a CHANGE to the app in ``resume``: the PM, the
+    Designer and the Developer all take the previous artifacts as their base
+    and apply the request, so the result is the same product with one thing
+    different. The tests and the interface are regenerated from the updated
+    contract, so nothing is left describing the old app.
     """
     out = Path(out_dir)
     t0 = time.time()
@@ -347,6 +365,29 @@ def run_team(
             # Ablation wins over restored artifacts: a resumed ablated run
             # must behave like a fresh ablated run (designer gets no plan).
             st.plan = None
+    # A follow-up evolves an app: the previous artifacts are the base it is
+    # edited from, and the phases that would otherwise be skipped (the PM, the
+    # Designer, the Developer, the Tester, the interface) run again against
+    # that base.
+    prev_stories = prev_spec = prev_code = prev_tests = None
+    if followup.strip() and resume is not None:
+        prev_stories, prev_spec, prev_code, prev_tests = (
+            st.stories,
+            st.spec,
+            st.code,
+            st.tests,
+        )
+        st.stories = None
+        st.spec = None
+        st.code = None
+        st.tests = None
+        st.ui_spec = None
+        st.ui_code = None
+        st.ui_report = None
+        st.coverage = None
+        st.review = None
+    st.followup_prompt = followup
+    st.followup_of = followup_of
     # Scope LLM responses to this run so a later run with the same requirement
     # never inherits this run's completions from the shared backend cache.
     llm.set_run_scope(str(run_id or out.name))
@@ -405,7 +446,10 @@ def run_team(
             )
         if st.stories is None:
             emit("pm", "start", {"requirement": requirement})
-            st.stories = PM.requirement_to_stories(requirement)
+            if prev_stories is not None:
+                st.stories = PM.update_stories(requirement, followup, prev_stories)
+            else:
+                st.stories = PM.requirement_to_stories(requirement)
             _save(out, "stories.json", st.stories.model_dump_json(indent=2))
             emit(
                 "pm",
@@ -413,6 +457,7 @@ def run_team(
                 {
                     "stories": len(st.stories.stories),
                     "clarifying_question": st.stories.clarifying_question,
+                    "followup": bool(followup.strip()),
                 },
             )
         if cancelled_now():
@@ -447,7 +492,14 @@ def run_team(
 
         if st.spec is None:
             emit("designer", "start")
-            st.spec = Designer.stories_to_spec(st.stories, requirement=requirement, plan=st.plan)
+            if prev_spec is not None and st.stories is not None:
+                st.spec = Designer.update_spec(
+                    prev_spec, followup, st.stories, requirement=requirement
+                )
+            else:
+                st.spec = Designer.stories_to_spec(
+                    st.stories, requirement=requirement, plan=st.plan, want_ui=want_ui
+                )
             _save(out, "spec.yaml", st.spec.openapi_yaml)
             emit(
                 "designer",
@@ -460,10 +512,15 @@ def run_team(
             )
         # Recorded on the spec, not just in memory, so a resume reads it back
         # from plan.json and knows the UI is part of this run.
-        st.spec.has_ui = bool(want_ui and UI.is_ui_eligible(st.spec))
-        if want_ui and not st.spec.has_ui:
-            log("ui skipped: only an api-kind project with declared endpoints gets a UI")
-            st.skip_ui = True
+        if st.spec.kind == "fullstack":
+            # A full-stack application always ships an interface: it is the
+            # application's own landing page, served by the same process.
+            st.spec.has_ui = True
+        else:
+            st.spec.has_ui = bool(want_ui and UI.is_ui_eligible(st.spec))
+            if want_ui and not st.spec.has_ui:
+                log("ui skipped: only an api-kind project with declared endpoints gets a UI")
+                st.skip_ui = True
         _save(
             out,
             "plan.json",
@@ -484,7 +541,10 @@ def run_team(
 
         if st.code is None:
             emit("developer", "start")
-            st.code = Developer.spec_to_code(st.spec, plan=st.plan)
+            if prev_code is not None and st.spec is not None:
+                st.code = Developer.apply_change(prev_code, st.spec, followup, tests=prev_tests)
+            else:
+                st.code = Developer.spec_to_code(st.spec, plan=st.plan)
             _write_code(out, st.code)
             emit(
                 "developer",
@@ -505,6 +565,14 @@ def run_team(
             st.code = Developer.repair_lint(st.code, lint_out, kind=st.spec.kind)
             _write_code(out, st.code)
             emit("developer", "progress", {"detail": "lint repair pass complete"})
+            # A terminal event as well: the rail decides a stage is done from
+            # its LAST event, and a lingering "progress" made a finished
+            # developer look stopped (or unfinished) once the run ended.
+            emit(
+                "developer",
+                "done",
+                {"files": sorted(st.code.files), "lint_repaired": True},
+            )
         if cancelled_now():
             return finish_cancelled()
 
@@ -540,7 +608,11 @@ def run_team(
         # Boot check: the code must import, and expose what the contract declares.
         # A program declares a public interface rather than an ASGI app object.
         declared = st.spec.public_api if st.spec.kind == "program" else None
-        booted, boot_msg = Runner.boot_check(st.code, public_api=declared)
+        # A full-stack application must also serve a page at "/". Importing
+        # cleanly is not enough: without the mount, the person opening the
+        # preview gets a 404 and the "full-stack app" is a bare API.
+        web_root = st.spec.kind == "fullstack"
+        booted, boot_msg = Runner.boot_check(st.code, public_api=declared, web_root=web_root)
         _save(out, "boot.txt", boot_msg)
         emit("runner", "progress", {"detail": f"boot check: {'ok' if booted else 'FAILED'}"})
         if cancelled_now():
@@ -551,6 +623,8 @@ def run_team(
             # enters the same loop as a failing test instead of ending the run.
             log("boot check failed; routing the traceback to the developer")
             no_ops = 0
+            # What the next repair request says about the last attempt.
+            boot_note = ""
             for _ in range(max_dev):
                 if cancelled_now():
                     return finish_cancelled()
@@ -573,22 +647,33 @@ def run_team(
                         ),
                         refl,
                         kind=st.spec.kind,
+                        spec=st.spec,
+                        note=boot_note,
                     )
                 except GenerationError as exc:
                     log(f"boot repair failed: {exc}")
                 if st.code.files == before:
                     # A model occasionally re-emits the same file. One no-op is
                     # not proof it cannot fix it, but repeating forever is not
-                    # progress either, so allow a couple before giving up.
+                    # progress either, so allow a couple before giving up --
+                    # and ask differently the second time.
                     no_ops += 1
                     if no_ops >= 2:
                         break
+                    boot_note = (
+                        "Your previous reply reproduced the current code exactly, so the "
+                        "import still fails. Make one concrete, minimal edit that fixes "
+                        "the traceback above, and reply with the complete corrected file.\n"
+                    )
                     continue
                 no_ops = 0
+                boot_note = ""
                 st.retry_dev += 1
                 _write_code(out, st.code)
                 emit("developer", "start", {"reason": "boot_failure", "retry": st.retry_dev})
-                booted, boot_msg = Runner.boot_check(st.code, public_api=declared)
+                booted, boot_msg = Runner.boot_check(
+                    st.code, public_api=declared, web_root=web_root
+                )
                 _save(out, "boot.txt", boot_msg)
                 emit(
                     "runner", "progress", {"detail": f"boot check: {'ok' if booted else 'FAILED'}"}
@@ -602,6 +687,18 @@ def run_team(
                 emit("pipeline", "error", {"error": st.error})
                 _finish(out, st, t0, emit)
                 return st
+            # Boot repair succeeded. Without a terminal event the node's last
+            # event stayed "start (retry #N boot_failure)", which the rail
+            # renders as stopped — a repaired job looked abandoned.
+            emit(
+                "developer",
+                "done",
+                {
+                    "files": sorted(st.code.files),
+                    "repaired": "boot_failure",
+                    "retries": st.retry_dev,
+                },
+            )
 
         if skip_tester:
             # Ablation: the Developer writes its own checks inline instead. There
@@ -631,7 +728,15 @@ def run_team(
         return st
 
     # ---- test / fix loop ----
+    dev_repaired = False
     attempt = 0
+    # A single empty patch is not evidence that the model cannot fix the
+    # failures: a truncated or rate-limited reply is indistinguishable from a
+    # deliberate no-op at this layer. Give it one more chance before stopping.
+    patch_no_ops = 0
+    # What the next patch request says about the last attempt. It starts
+    # empty and is filled in when an attempt changes nothing.
+    patch_note = ""
     while True:
         if cancelled_now():
             return finish_cancelled()
@@ -656,6 +761,18 @@ def run_team(
             return finish_cancelled()
         if st.report.ok:
             st.status = "tests_green"
+            if dev_repaired:
+                # Same terminal-event rule as above: the last developer event
+                # was the retry that fixed the code, so close the stage.
+                emit(
+                    "developer",
+                    "done",
+                    {
+                        "files": sorted(st.code.files),
+                        "repaired": "code_bug",
+                        "retries": st.retry_dev,
+                    },
+                )
             break
 
         # triage and reflection read the same TestReport and never touch each
@@ -688,6 +805,7 @@ def run_team(
             st.retry_test += 1
             log("triage: test_bug -> tester regenerates")
             emit("tester", "start", {"reason": "test_bug", "retry": st.retry_test})
+            regenerated = True
             try:
                 st.tests = Tester.spec_to_tests(
                     st.spec,
@@ -697,7 +815,19 @@ def run_team(
                     code=st.code,
                 )
             except GenerationError as exc:
+                regenerated = False
                 log(f"tester regeneration failed: {exc}")
+            # Terminal event for the same reason as the developer's: a retry
+            # "start" left the tester stage looking stopped after the run.
+            emit(
+                "tester",
+                "done",
+                {
+                    "files": sorted(st.tests.files),
+                    "regenerated": regenerated,
+                    "retry": st.retry_test,
+                },
+            )
             continue
 
         before = dict(st.code.files)
@@ -707,7 +837,13 @@ def run_team(
             break
         try:
             st.code = Developer.patch_code(
-                st.code, st.report, refl, tests=st.tests, kind=st.spec.kind
+                st.code,
+                st.report,
+                refl,
+                tests=st.tests,
+                kind=st.spec.kind,
+                spec=st.spec,
+                note=patch_note,
             )
         except GenerationError as exc:
             # The model was never reached (rate limit, outage): the bundle is
@@ -718,12 +854,27 @@ def run_team(
             emit("developer", "done", {"changed": False, "retry": st.retry_dev, "llm_error": True})
             break
         if st.code.files == before:
-            # An unchanged bundle means every further attempt repeats this one.
+            patch_no_ops += 1
+            if patch_no_ops < 2:
+                # The same prompt produced the same answer. Say so in the next
+                # one: a retry that repeats the request verbatim gets the same
+                # reply back.
+                patch_note = (
+                    "Your previous reply reproduced the current code exactly, so nothing "
+                    "changed. Make one concrete, minimal edit that fixes the failure, and "
+                    "reply with the complete corrected file.\n"
+                )
+                log("developer patch produced no change; retrying with a different ask")
+                continue
+            # Two unchanged bundles mean every further attempt repeats this one.
             st.status = "unresolved"
             st.error = "developer patch produced no change; stopping instead of looping"
             emit("developer", "done", {"changed": False, "retry": st.retry_dev})
             break
+        patch_no_ops = 0
+        patch_note = ""
         st.retry_dev += 1
+        dev_repaired = True
         _write_code(out, st.code)
         emit("developer", "start", {"reason": verdict_txt, "retry": st.retry_dev})
         # Re-verify the entrypoint still resolves after a patch. A program has
@@ -744,10 +895,15 @@ def run_team(
     # UI verdict is reported to the user and to the eval metrics, and the
     # terminal status below is decided by the backend alone.
     if st.status == "tests_green" and st.spec.has_ui and not st.skip_ui:
+        # A full-stack application serves its own interface from the app
+        # package, so the files land in code/static/ and the running process
+        # serves them. A service with a separate preview page keeps them in
+        # ui/, where the preview gateway can serve them.
+        into_static = st.spec.kind == "fullstack"
         try:
             if st.ui_spec is None:
                 emit("ui_designer", "start")
-                st.ui_spec = UI.design_ui(st.spec, st.stories)
+                st.ui_spec = UI.design_ui(st.spec, st.stories, followup=followup)
                 _save(out, "ui_contract.json", st.ui_spec.model_dump_json(indent=2))
                 emit(
                     "ui_designer",
@@ -770,14 +926,54 @@ def run_team(
                     st.ui_spec,
                     entry_module=st.code.entry_module,
                     entry_attr=st.code.entry_attr,
+                    followup=followup,
                 )
-                _write_ui_code(out, st.ui_code)
+                _write_ui_code(out, st.ui_code, into_static=into_static)
                 emit("ui_developer", "done", {"files": sorted(st.ui_code.files)})
             if cancelled_now():
                 return finish_cancelled()
 
             emit("ui_gate", "start")
             st.ui_report = UI.gate(st.spec, st.ui_spec, st.ui_code.files)
+            if st.ui_report.failures:
+                # One targeted repair pass. The first generation is the cheap
+                # path; when the gate finds a bare shell or missing states, the
+                # exact findings are more useful than a blind second attempt.
+                # Keep the repaired UI only when it removes failures.
+                emit("ui_developer", "start", {"reason": "ui_gate", "retry": 1})
+                repaired_code = None
+                repaired_report = None
+                try:
+                    repaired_code = UI.build_ui(
+                        st.spec,
+                        st.stories,
+                        st.ui_spec,
+                        entry_module=st.code.entry_module,
+                        entry_attr=st.code.entry_attr,
+                        feedback=UI.gate_feedback(st.ui_report),
+                        followup=followup,
+                    )
+                    repaired_report = UI.gate(st.spec, st.ui_spec, repaired_code.files)
+                except GenerationError as exc:
+                    log(f"ui repair pass failed: {exc}")
+                improved = (
+                    repaired_code is not None
+                    and repaired_report is not None
+                    and len(repaired_report.failures) < len(st.ui_report.failures)
+                )
+                if improved:
+                    st.ui_code = repaired_code
+                    st.ui_report = repaired_report
+                    _write_ui_code(out, st.ui_code, into_static=into_static)
+                emit(
+                    "ui_developer",
+                    "done",
+                    {
+                        "files": sorted(st.ui_code.files),
+                        "repaired": bool(improved),
+                        "remaining": len(st.ui_report.failures),
+                    },
+                )
             _save(out, "ui_report.json", st.ui_report.model_dump_json(indent=2))
             emit(
                 "ui_gate",
@@ -793,6 +989,25 @@ def run_team(
                     "ui gate: "
                     + "; ".join(f"{c.name}: {c.detail}" for c in st.ui_report.failures)
                     + " (advisory; terminal status unaffected)"
+                )
+            # The domain check ran before the UI existed and could only read
+            # the backend. Now score the whole deliverable: a full-stack run
+            # legitimately names its subject in the page ("Tic Tac Toe" in the
+            # title) even when the Python identifiers do not repeat it. This
+            # can only add evidence — the gate already passed above, and the
+            # blob is a superset of the code the verdict was based on.
+            if st.coverage is not None and st.ui_code is not None and st.coverage.missing:
+                routes = all_routes(st.code.files) if st.spec.kind == "api" else set()
+                verdict = coverage_check(requirement, {**st.code.files, **st.ui_code.files}, routes)
+                st.coverage = CoverageReport(
+                    covered=verdict.covered,
+                    missing=verdict.missing,
+                    conclusive=verdict.conclusive,
+                )
+                _save(out, "coverage.json", st.coverage.model_dump_json(indent=2))
+                log(
+                    "domain check over the full deliverable (code + UI): "
+                    f"missing {verdict.missing or 'nothing'}"
                 )
         except GenerationError as exc:
             st.ui_report = UiReport(
@@ -811,6 +1026,9 @@ def run_team(
     if st.status == "tests_green" and skip_reviewer:
         st.status = "accepted_no_review"
     elif st.status == "tests_green":
+        # A review round that changes nothing is the same dead end as a test
+        # round that changes nothing; the next ask says so.
+        review_no_ops = 0
         for _ in range(max_review + 1):
             if cancelled_now():
                 return finish_cancelled()
@@ -861,6 +1079,14 @@ def run_team(
                     "Review blockers to fix: " + "; ".join(c.message for c in st.review.blockers),
                     tests=st.tests,
                     kind=st.spec.kind,
+                    spec=st.spec,
+                    note=(
+                        "Your previous reply reproduced the current code exactly, so the "
+                        "blockers survived. Make one concrete, minimal edit per blocker and "
+                        "reply with the complete corrected file.\n"
+                        if review_no_ops
+                        else ""
+                    ),
                 )
             except GenerationError as exc:
                 st.status = "unresolved_review"
@@ -870,6 +1096,7 @@ def run_team(
                 st.status = "unresolved_review"
                 st.error = "review patch produced no change; stopping instead of looping"
                 break
+            review_no_ops = 0
             st.retry_review += 1
             _write_code(out, st.code)
             st.report = Runner.run_tests(st.code, st.tests, use_docker=use_docker)

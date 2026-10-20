@@ -139,9 +139,7 @@ def image_exists(tag: str) -> bool:
 
 
 def network_exists(name: str) -> bool:
-    proc = _run(
-        [DOCKER, "network", "inspect", "--format", "{{.Internal}}", name], timeout=15
-    )
+    proc = _run([DOCKER, "network", "inspect", "--format", "{{.Internal}}", name], timeout=15)
     return proc.returncode == 0
 
 
@@ -179,9 +177,7 @@ def ensure_network(name: str) -> None:
     redefinition: silently recreating it would break whichever containers are
     already attached.
     """
-    proc = _run(
-        [DOCKER, "network", "inspect", "--format", "{{.Internal}}", name], timeout=15
-    )
+    proc = _run([DOCKER, "network", "inspect", "--format", "{{.Internal}}", name], timeout=15)
     if proc.returncode == 0:
         if proc.stdout.strip() != "true":
             raise DockerUnavailable(
@@ -199,7 +195,6 @@ def ensure_network(name: str) -> None:
             f"{(created.stderr or '').strip()[:200]}"
         )
     log.info("created internal sandbox network %s", name)
-
 
 
 def ensure_image(base: str = "agent-team-sandbox:local", context: Path | None = None) -> str:
@@ -283,7 +278,6 @@ def start_detached(argv: list[str], timeout: int = 60, mount: str | None = None)
     return container_id
 
 
-
 def published_port(container_id: str, container_port: int = 8000) -> int:
     _r = _remote()
     if _r is not None:
@@ -309,9 +303,7 @@ def published_port(container_id: str, container_port: int = 8000) -> int:
         port = binding.get("HostPort")
         if port:
             return int(port)
-    raise DockerUnavailable(
-        f"container {container_id} publishes no port for {container_port}/tcp"
-    )
+    raise DockerUnavailable(f"container {container_id} publishes no port for {container_port}/tcp")
 
 
 def container_ip(container_id: str, network: str) -> str:
@@ -368,7 +360,6 @@ def reachable_address(
     if network_is_internal(network):
         return container_ip(container_id, network), container_port
     return "127.0.0.1", published_port(container_id, container_port)
-
 
 
 def preview_base_url(container_id: str) -> str | None:

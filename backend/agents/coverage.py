@@ -27,6 +27,52 @@ import re
 # false failures, which is the expensive direction for this gate.
 GENERIC = frozenset(
     [
+        # Plain prose filler and API-shape words seen in real requirements ---
+        # "with CRUD /tasks plus a done filter. Include a static web UI ..."
+        # produced user-facing "missing" noise from nothing the code could
+        # ever contain.
+        "plus",
+        "include",
+        "includes",
+        "included",
+        "including",
+        "static",
+        "crud",
+        "same",
+        "via",
+        "both",
+        "either",
+        # UI prose and widget words from full-stack asks: "show the board, let
+        # two players take turns with a reset button" produced user-facing
+        # "missing" entries no backend implementation would ever contain.
+        "show",
+        "shows",
+        "showing",
+        "shown",
+        "let",
+        "lets",
+        "take",
+        "takes",
+        "taking",
+        "taken",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "button",
+        "buttons",
+        "click",
+        "clicks",
+        "clicked",
+        "clicking",
+        "turn",
+        "turns",
         "api",
         "rest",
         "apis",
@@ -421,14 +467,22 @@ MIN_GROUPS = 2
 # shares essentially *no* vocabulary with the requirement (0 covered). A correct
 # implementation always reflects the main entities.
 PASS_RATIO = 0.35
-MIN_COVERED = 2
+# One anchor term is enough for a short ask. "make the tic tac toe game." has
+# four groups (tic, tac, toe, game) and a correct implementation names the
+# subject once ("Game", "board", "move") — the old floor of two matches failed
+# such a game before a single test ran. Zero overlap remains the wrong-domain
+# signal.
+MIN_COVERED = 1
 
 
 def _required(n_groups: int) -> int:
-    """How many groups must be reflected for a requirement of this size."""
-    import math
+    """How many groups must be reflected for a requirement of this size.
 
-    return max(MIN_COVERED, math.ceil(n_groups * PASS_RATIO))
+    ``round`` rather than ``ceil`` keeps the ~35% habit for real requirements
+    while leaving small asks at a single anchor: ``ceil(4 * 0.35) == 2``
+    demanded half of a four-word requirement and rejected correct games.
+    """
+    return max(MIN_COVERED, round(n_groups * PASS_RATIO))
 
 
 def _singular(word: str) -> str:

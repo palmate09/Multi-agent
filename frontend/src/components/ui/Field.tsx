@@ -59,6 +59,8 @@ export interface InputProps
   invalid?: boolean;
   /** Points at an existing element, usually a form-level error. */
   describedBy?: string;
+  /** A control that sits inside the right edge of the field, e.g. show/hide. */
+  trailing?: ReactNode;
 }
 
 /** Labelled text input. The id, the label and the error are wired together
@@ -71,6 +73,8 @@ export function Input({
   id,
   invalid,
   describedBy,
+  trailing,
+  type = 'text',
   className,
   ...rest
 }: InputProps) {
@@ -89,14 +93,30 @@ export function Input({
       htmlFor={inputId}
       describedBy={own}
     >
-      <input
-        id={inputId}
-        className={cn(className)}
-        aria-invalid={error || invalid ? true : undefined}
-        aria-describedby={desc}
-        required={required}
-        {...rest}
-      />
+      {trailing ? (
+        <div className="input-wrap">
+          <input
+            id={inputId}
+            type={type}
+            className={cn('has-trailing', className)}
+            aria-invalid={error || invalid ? true : undefined}
+            aria-describedby={desc}
+            required={required}
+            {...rest}
+          />
+          <div className="input-trailing">{trailing}</div>
+        </div>
+      ) : (
+        <input
+          id={inputId}
+          type={type}
+          className={cn(className)}
+          aria-invalid={error || invalid ? true : undefined}
+          aria-describedby={desc}
+          required={required}
+          {...rest}
+        />
+      )}
     </FieldShell>
   );
 }

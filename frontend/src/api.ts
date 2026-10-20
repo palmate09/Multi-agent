@@ -122,6 +122,17 @@ export const api = {
       body: JSON.stringify({}),
     }),
 
+  /**
+   * Apply one change to an app that already exists. The change runs as a
+   * child of this run and is executed one at a time, in the order the
+   * follow-ups were given.
+   */
+  addFollowup: (runId: string, prompt: string) =>
+    request<RunSummary>(`/api/runs/${runId}/followups`, {
+      method: 'POST',
+      body: JSON.stringify({ prompt }),
+    }),
+
   previewStatus: (runId: string) => request<PreviewStatus>(`/api/runs/${runId}/playground`),
 
   /** Start (or restart) the run's preview. Idempotent when already running. */

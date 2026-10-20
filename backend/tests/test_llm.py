@@ -210,6 +210,7 @@ def test_transient_429_is_retried(monkeypatch):
     monkeypatch.setenv("LLM_RETRY_MAX", "3")
     monkeypatch.setenv("LLM_RETRY_BACKOFF", "0")
     monkeypatch.setenv("LLM_RETRY_SLEEP", "0")
+    monkeypatch.setenv("LLM_QUOTA_WAITS", "0")
     attempts = {"n": 0}
 
     def flaky(url, payload, headers=None, timeout=60):
@@ -222,6 +223,40 @@ def test_transient_429_is_retried(monkeypatch):
     out = llm._post_json_retry("https://example.invalid/x", {})
     assert out["choices"][0]["message"]["content"] == "recovered"
     assert attempts["n"] == 3
+
+
+def test_a_rate_limited_call_waits_out_the_window(monkeypatch):
+    """A 429 on a token-per-minute quota is a closed window, not a dead end.
+
+    Hosted free tiers meter tokens per minute, so the quota reopens about a
+    minute later. The ordinary 4s/8s backoff expires inside that window, and
+    the run died of a quota it would have survived a moment later.
+    """
+    import urllib.error
+
+    monkeypatch.setenv("LLM_RETRY_MAX", "1")
+    monkeypatch.setenv("LLM_QUOTA_WAITS", "0,0")
+    waits: list[float] = []
+    monkeypatch.setattr(llm, "_interruptible_sleep", lambda delay: waits.append(delay))
+    calls = {"n": 0}
+
+    def flaky(url, payload, headers=None, timeout=60):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise urllib.error.HTTPError(url, 429, "Too Many Requests", None, None)
+        return {"ok": True}
+
+    monkeypatch.setattr(llm, "_post_json", flaky)
+    assert llm._post_json_retry("https://example.invalid/x", {}) == {"ok": True}
+    assert calls["n"] == 3
+    assert len(waits) == 2
+
+
+def test_quota_waits_span_the_rate_limit_window(monkeypatch):
+    monkeypatch.delenv("LLM_QUOTA_WAITS", raising=False)
+    waits = llm._quota_waits()
+    assert waits
+    assert max(waits) >= 60, "the default wait must outlast a per-minute quota window"
 
 
 def test_503_is_retried_then_succeeds(monkeypatch):

@@ -36,7 +36,7 @@ import os
 import re
 import shutil
 import socket
-import subprocess
+import subprocess  # nosec B404 - the preview starts the generated app; see _spawn_subprocess
 import sys
 import threading
 import time
@@ -88,6 +88,10 @@ _PROBE_MAX_INTERVAL = 0.25
 _CONTAINER_PORT = 8000
 
 IDLE_STATES = ("stopped", "crashed")
+
+# The element a generated interface renders into. A page served without one is
+# a blank frame, so the readiness probe treats it as "not up yet".
+_MOUNT_ELEMENT = re.compile(r'id\s*=\s*["\'](?:root|app|main)["\']', re.I)
 
 #: One requirement line: an optional name, an optional extras group, an optional
 #: version specifier and an optional environment marker. Deliberately not a full
@@ -168,9 +172,7 @@ def child_env(workdir: Path, limits: SandboxLimits | None = None) -> dict[str, s
     about why.
     """
     env = {k: v for k, v in os.environ.items() if k not in STRIPPED_ENV and "API_KEY" not in k}
-    data_dir = (
-        str(workdir) if limits is None else (limits.data_mount or str(workdir))
-    )
+    data_dir = str(workdir) if limits is None else (limits.data_mount or str(workdir))
     env.update(
         {
             # Tells generated code it is being previewed, not deployed.
@@ -257,13 +259,22 @@ class PreviewSession:
 
     @property
     def entry_path(self) -> str:
-        """The best path to open the preview at: the spec's first real route.
+        """The best path to open the preview at.
 
-        Same list the boot probe uses, so the frame and the health check agree
-        on what "the app is up" means. Falls back to ``/`` for an app that
-        declares nothing, which is then also what the probe tried.
+        A full-stack application serves its own interface at ``/``: the page
+        and the API are the same process, so the frame opens the product
+        itself. A service with a separate preview page is served from the
+        gateway root (``/`` returns ``ui/index.html``) and the page's relative
+        fetches resolve under ``/preview/<run_id>/``. Pointing the frame at the
+        spec's first API route instead (``/board``) rendered raw JSON and read
+        as "the preview is broken" while the app was serving fine. API-only
+        runs keep the spec-route fallback, matching the boot probe.
         """
         try:
+            if _run_kind(self.run_dir) == "fullstack":
+                return "/"
+            if (self.run_dir / "ui" / "index.html").is_file():
+                return "/"
             return _probe_paths(self.run_dir)[0]
         except Exception:
             return "/"
@@ -277,7 +288,6 @@ class PreviewSession:
             # own (OOM, a review patch that broke the app).
             return Docker.is_running(self.container_id)
         return self.proc is not None and self.proc.poll() is None
-
 
     def log_tail(self, lines: int = 40) -> str:
         """The last ``lines`` of the app's output, from wherever it is running."""
@@ -516,9 +526,7 @@ class PlaygroundService:
                 raise
             # A failure before anything was spawned is a plain error: no
             # engine, no image, no entry point to serve.
-            raise RuntimeError(
-                f"preview for run '{run_id}' could not start: {exc}"
-            ) from exc
+            raise RuntimeError(f"preview for run '{run_id}' could not start: {exc}") from exc
 
         session.error = ""
         if self._await_health(session, source):
@@ -533,10 +541,18 @@ class PlaygroundService:
             )
         else:
             session.state = "crashed"
-            detail = (
-                f"the app did not answer 200 on {', '.join(_probe_paths(source))} within "
-                f"{self.settings.preview_boot_timeout_seconds}s"
-            )
+            if _run_kind(source) == "fullstack":
+                detail = (
+                    "the application did not serve its page at / within "
+                    f"{self.settings.preview_boot_timeout_seconds}s. A full-stack app must "
+                    "mount its interface at the root path, so the person opening the "
+                    "preview gets the product rather than a 404."
+                )
+            else:
+                detail = (
+                    f"the app did not answer on {', '.join(_probe_paths(source))} within "
+                    f"{self.settings.preview_boot_timeout_seconds}s"
+                )
             session.error = (detail + "\n" + session.log_tail(20))[-1200:]
             log.warning("preview %s failed to boot: %s", run_id, detail)
         session.persist()
@@ -580,6 +596,12 @@ class PlaygroundService:
         if ui_dir.is_dir():
             for target in (workdir / "ui", workdir / "static"):
                 shutil.copytree(ui_dir, target, dirs_exist_ok=True)
+        # A full-stack application mounts its own interface directory, and the
+        # container's filesystem is read-only, so the directory has to exist
+        # before the app starts. The generation normally ships it; this covers
+        # the case where it did not, so the mount finds a directory instead of
+        # taking the whole app down at import.
+        (workdir / "static").mkdir(parents=True, exist_ok=True)
 
     def _discover_entry(self, workdir: Path) -> tuple[str, str] | None:
         """Resolve the ASGI app the way the test runner does: from the code.
@@ -625,7 +647,9 @@ class PlaygroundService:
         if not wanted:
             return False
         if wanted <= _installed_distributions():
-            log.debug("preview %s: all %d requirements already satisfied", workdir.name, len(wanted))
+            log.debug(
+                "preview %s: all %d requirements already satisfied", workdir.name, len(wanted)
+            )
             return False
         if Runner.uses_docker():
             # Named, not installed. A user watching a preview crash on an
@@ -638,7 +662,7 @@ class PlaygroundService:
             )
             return False
         try:
-            subprocess.run(
+            subprocess.run(  # nosec B603 - a fixed argv, no shell, in a private workdir
                 [sys.executable, "-m", "pip", "install", "--quiet", "-r", str(req)],
                 cwd=workdir,
                 env=child_env(workdir),
@@ -696,6 +720,9 @@ class PlaygroundService:
                 "uvicorn",
                 f"{module}:{attr}",
                 "--host",
+                # nosec B104 - inside the container the app must listen on
+                # every interface; the port is reachable only through the
+                # sandbox network, which has no route off the host.
                 "0.0.0.0",
                 "--port",
                 str(_CONTAINER_PORT),
@@ -722,7 +749,7 @@ class PlaygroundService:
     def _spawn_subprocess(self, session: PreviewSession, module: str, attr: str) -> None:
         session.port = _free_port()
         logfile = session.log_path.open("w")
-        session.proc = subprocess.Popen(
+        session.proc = subprocess.Popen(  # nosec B603 - a fixed argv, no shell
             [
                 sys.executable,
                 "-m",
@@ -757,6 +784,7 @@ class PlaygroundService:
         slow app still gets the full timeout.
         """
         candidates = _probe_paths(source)
+        needs_page = _run_kind(source) == "fullstack"
         deadline = time.time() + max(5, self.settings.preview_boot_timeout_seconds)
         delay = _PROBE_START_INTERVAL
         while time.time() < deadline:
@@ -765,10 +793,37 @@ class PlaygroundService:
             for candidate in candidates:
                 url = f"{session.base_url}{candidate}"
                 try:
-                    if httpx.get(url, timeout=2.0, follow_redirects=False).status_code == 200:
-                        return True
+                    # Any HTTP answer below 500 proves the process is serving:
+                    # a POST-only route answers 405 to this GET, and an app
+                    # with no root route answers 404. Both are healthy servers;
+                    # demanding 200 reported a perfectly good game API as
+                    # crashed for 30s and left the preview blank. The sidecar
+                    # relay answers 502 while a container is not up, so a 5xx
+                    # never counts as life.
+                    response = httpx.get(url, timeout=2.0, follow_redirects=False)
                 except Exception:
+                    # nosec B112 - a candidate that could not be reached is
+                    # simply not ready; the next candidate is tried.
                     continue
+                if response.status_code >= 500:
+                    continue
+                if needs_page:
+                    # A full-stack application has to serve a page at the root,
+                    # not JSON and not a 404: the person opened this to use the
+                    # app. Any other path answering is not evidence that the
+                    # product works, so keep waiting for the page itself.
+                    if candidate != "/":
+                        continue
+                    if response.status_code != 200 or "text/html" not in response.headers.get(
+                        "content-type", ""
+                    ):
+                        continue
+                    # And that page has to have somewhere to render into. A
+                    # page with no mount element is a blank frame: the app is
+                    # up, the title is right, and there is nothing on screen.
+                    if not _MOUNT_ELEMENT.search(response.text or ""):
+                        continue
+                return True
             time.sleep(delay)
             delay = min(delay * 2, _PROBE_MAX_INTERVAL)
         return False
@@ -833,22 +888,56 @@ class PlaygroundService:
         return len(expired)
 
 
+def _run_kind(source: Path) -> str:
+    """The project kind of a run: "fullstack", "api" or "program".
+
+    Read from the run's ``plan.json``, which the workflow writes as soon as
+    the contract exists. An unreadable plan means an older run, which was
+    always an API.
+    """
+    try:
+        plan = json.loads((source / "plan.json").read_text())
+        kind = str(plan.get("kind") or "").strip()
+        if kind in {"fullstack", "api", "program"}:
+            return kind
+    except Exception:
+        pass
+    return "api"
+
+
 def _probe_paths(source: Path) -> list[str]:
-    """Which paths to try, in order, when checking whether the app is up."""
+    """Which paths to try, in order, when checking whether the app is up.
+
+    The probe sends GET. Only concrete GET paths are useful: a spec path
+    declared POST-only answers 405, and a templated path
+    (``/games/{gameId}``) is not a URL at all — probing the literal braces
+    answers 422. A real run that declared only POST routes and one templated
+    GET was reported as crashed on all three candidates while it was serving
+    perfectly. The root and ``/health`` fallbacks keep the probe working for
+    apps whose spec names no plain GET path.
+
+    A full-stack application leads with ``/``: the page it serves is the thing
+    the person came for, so that is the path worth waiting on.
+    """
     spec_file = source / "spec.yaml"
     candidates: list[str] = []
     if spec_file.exists():
         try:
             from agents.introspect import spec_paths
 
-            _pairs, paths = spec_paths(spec_file.read_text())
-            candidates = sorted(p for p in paths if p != "/health")
+            pairs, paths = spec_paths(spec_file.read_text())
+            gets = {p for p, method in pairs if method.upper() == "GET"}
+            candidates = sorted(p for p in paths if p in gets and "{" not in p and p != "/health")
         except Exception:
             candidates = []
-    for fallback in ("/health", "/"):
-        if fallback not in candidates:
-            candidates.append(fallback)
-    return candidates[:3]
+    if _run_kind(source) == "fullstack":
+        ordered = ["/"] + [c for c in candidates if c != "/"]
+    else:
+        ordered = candidates
+        for fallback in ("/", "/health"):
+            if fallback not in ordered:
+                ordered.append(fallback)
+    return ordered[:3]
 
 
 _service: PlaygroundService | None = None

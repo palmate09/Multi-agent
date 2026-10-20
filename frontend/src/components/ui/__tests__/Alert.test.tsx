@@ -16,6 +16,16 @@ describe('Alert', () => {
     expect(screen.getByRole('status')).toHaveClass('note');
   });
 
+  it.each(['success', 'warning'] as const)('renders %s tone as a polite status', tone => {
+    render(<Alert tone={tone}>Heads up</Alert>);
+    expect(screen.getByRole('status')).toHaveClass(tone);
+  });
+
+  it('keeps its icon out of the accessibility tree', () => {
+    const { container } = render(<Alert tone="error">Failed</Alert>);
+    expect(container.querySelector('svg')).toHaveAttribute('aria-hidden', 'true');
+  });
+
   it('has no accessibility violations', async () => {
     const { container } = render(<Alert tone="error">Accessible</Alert>);
     const results = await axe(container);

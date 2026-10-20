@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { axe } from 'jest-axe';
-import { Tabs } from '../Tabs';
+import { CountBadge, Tabs } from '../Tabs';
 
 const TABS = [
   { id: 'a', label: 'Tab A' },
@@ -71,5 +71,43 @@ describe('Tabs', () => {
     );
     const results = await axe(container);
     expect(results).toHaveNoViolations();
+  });
+
+  it('draws a divider only where the group changes', () => {
+    const grouped = [
+      { id: 'a', label: 'A', group: 'one' },
+      { id: 'b', label: 'B', group: 'one' },
+      { id: 'c', label: 'C', group: 'two' },
+    ] as const;
+    const { container } = render(
+      <Tabs items={grouped} value="a" onChange={vi.fn()}>
+        <div>Panel</div>
+      </Tabs>
+    );
+    // One divider, between B and C, and it is not a tab.
+    expect(container.querySelectorAll('.tab-sep')).toHaveLength(1);
+    expect(screen.getAllByRole('tab')).toHaveLength(3);
+  });
+
+  it('adds no dividers when no groups are given', () => {
+    const { container } = render(
+      <Tabs items={TABS} value="a" onChange={vi.fn()}>
+        <div>Panel</div>
+      </Tabs>
+    );
+    expect(container.querySelectorAll('.tab-sep')).toHaveLength(0);
+  });
+
+  it('keeps the count readable as "Review (2)" for assistive tech', () => {
+    render(
+      <Tabs
+        items={[{ id: 'r', label: 'Review', badge: <CountBadge count={2} /> }]}
+        value="r"
+        onChange={vi.fn()}
+      >
+        <div>Panel</div>
+      </Tabs>
+    );
+    expect(screen.getByRole('tab')).toHaveTextContent('Review (2)');
   });
 });

@@ -295,11 +295,27 @@ def test_remote_decomposes_only_the_allowlisted_fields():
     # it to mount the same data by name instead of by a host path that does not
     # exist for the daemon.
     assert set(payload) == {
-        "image", "cmd", "mount", "mount_volume", "workdir", "env", "name", "with_data",
+        "image",
+        "cmd",
+        "mount",
+        "mount_volume",
+        "workdir",
+        "env",
+        "name",
+        "with_data",
     }
     blob = repr(payload)
-    for flag in ("--privileged", "--cap-add", "--network", "--user", "--read-only",
-                 "--security-opt", "--pid", "--ipc", "--uts"):
+    for flag in (
+        "--privileged",
+        "--cap-add",
+        "--network",
+        "--user",
+        "--read-only",
+        "--security-opt",
+        "--pid",
+        "--ipc",
+        "--uts",
+    ):
         assert flag not in blob, f"{flag} reached the sidecar request"
 
 
@@ -312,10 +328,26 @@ def test_remote_decompose_handles_a_command_that_looks_like_flags():
     from sandbox.remote import decompose
 
     argv = [
-        "docker", "run", "--rm", "--network", "sandbox-net", "--read-only",
-        "--memory", "512m", "--user", "10001:10001", "--workdir", "/app",
-        "--entrypoint", "python", "agent-team-sandbox:local",
-        "-m", "pytest", "-q", "-x", "--tb=short",
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "sandbox-net",
+        "--read-only",
+        "--memory",
+        "512m",
+        "--user",
+        "10001:10001",
+        "--workdir",
+        "/app",
+        "--entrypoint",
+        "python",
+        "agent-team-sandbox:local",
+        "-m",
+        "pytest",
+        "-q",
+        "-x",
+        "--tb=short",
     ]
     payload = decompose(argv)
     assert payload["cmd"] == ["-m", "pytest", "-q", "-x", "--tb=short"]
@@ -414,7 +446,9 @@ def test_a_database_url_carrying_a_password_is_still_refused():
     """The relaxation must not become a hole: the secret is the reason the rule
     exists. `postgresql+psycopg://mat:hunter2@postgres:5432/mat` hands the app
     the database password."""
-    assert sidecar._carries_credentials("DATABASE_URL", "postgresql+psycopg://mat:hunter2@pg:5432/mat")
+    assert sidecar._carries_credentials(
+        "DATABASE_URL", "postgresql+psycopg://mat:hunter2@pg:5432/mat"
+    )
     with pytest.raises(HTTPException) as exc:
         sidecar._sanitise_env({"DATABASE_URL": "postgresql+psycopg://mat:hunter2@pg:5432/mat"})
     assert exc.value.status_code == 400
@@ -448,8 +482,18 @@ def test_a_volume_mount_is_distinguished_from_a_host_path():
     from sandbox.remote import decompose
 
     host_path = decompose(
-        ["docker", "run", "--rm", "-v", "/data/runs/b1:/app:ro", "--workdir", "/app",
-         "img", "-m", "pytest"]
+        [
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            "/data/runs/b1:/app:ro",
+            "--workdir",
+            "/app",
+            "img",
+            "-m",
+            "pytest",
+        ]
     )
     assert host_path["mount"] == "/data/runs/b1"
     assert host_path["mount_volume"] is None
@@ -458,8 +502,18 @@ def test_a_volume_mount_is_distinguished_from_a_host_path():
     # the volume *at* the workdir would make the bundle directory and the volume
     # root the same place, so pytest would collect every other run's tests.
     by_volume = decompose(
-        ["docker", "run", "--rm", "-v", "runs-data:/app:ro", "--workdir", "/app/bundle-1",
-         "img", "-m", "pytest"]
+        [
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            "runs-data:/app:ro",
+            "--workdir",
+            "/app/bundle-1",
+            "img",
+            "-m",
+            "pytest",
+        ]
     )
     assert by_volume["mount_volume"] == "runs-data"
     assert by_volume["workdir"] == "/app/bundle-1"
@@ -480,9 +534,7 @@ def test_the_backend_dials_the_sidecar_not_the_container():
     monkey = pytest.MonkeyPatch()
     monkey.setenv("SANDBOX_API_URL", "http://sandbox:8001")
     try:
-        assert Docker.preview_base_url("abc123").startswith(
-            "http://sandbox:8001/sandbox/proxy/"
-        )
+        assert Docker.preview_base_url("abc123").startswith("http://sandbox:8001/sandbox/proxy/")
     finally:
         monkey.undo()
 
@@ -525,8 +577,12 @@ def test_a_bundle_path_is_never_handed_to_the_daemon_as_a_host_path(monkeypatch,
     from sandbox.flags import SandboxLimits, run_argv
 
     argv = run_argv(
-        "img", ["-m", "pytest"], limits=SandboxLimits(),
-        mount=None, mount_volume="runs-data", workdir="/app/bundle-1",
+        "img",
+        ["-m", "pytest"],
+        limits=SandboxLimits(),
+        mount=None,
+        mount_volume="runs-data",
+        workdir="/app/bundle-1",
     )
     payload = remote.decompose(argv)
     assert payload["mount"] is None

@@ -1,8 +1,13 @@
 # Improvement Plan — Full-Stack Generation + Live Playground
 
-> Status: planned, not yet implemented. Decisions locked: static HTML/JS/CSS UI
-> (no build) · UI verdict is advisory and never blocks acceptance · subprocess +
-> reverse-proxy playground gateway · `api`-kind projects only.
+> Status: **implemented and then extended**. The original plan shipped a static
+> preview page served by the gateway beside the API. What exists now goes
+> further: a run produces a **full-stack application** by default — the
+> generated app serves its own interface at `/` — and the sandbox runs that one
+> process, so the preview is the product rather than a page next to it.
+> Decisions locked: static HTML/JS/CSS interface (no build) · the interface
+> verdict is advisory and never blocks acceptance · containerised preview
+> behind a reverse-proxy gateway · `fullstack`-kind projects are the default.
 
 ## 0. Background
 

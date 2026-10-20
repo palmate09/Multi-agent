@@ -73,7 +73,7 @@ def _offline(monkeypatch):
     monkeypatch.setattr(
         designer,
         "stories_to_spec",
-        lambda stories, requirement="", plan=None: ApiSpec(
+        lambda stories, requirement="", plan=None, want_ui=False: ApiSpec(
             openapi_yaml=SPEC_YAML,
             endpoints=["/recipes"],
             entrypoint="main.py",
@@ -99,11 +99,13 @@ def _offline(monkeypatch):
 
 def _stub_ui(monkeypatch, *, spec=None, files=None, report=None):
     """Make the three UI nodes deterministic, failing where asked to."""
-    monkeypatch.setattr(ui, "design_ui", lambda s, stories=None, attempts=3: spec or UI_SPEC)
+    monkeypatch.setattr(
+        ui, "design_ui", lambda s, stories=None, attempts=3, followup="": spec or UI_SPEC
+    )
     monkeypatch.setattr(
         ui,
         "build_ui",
-        lambda s, stories, us, entry_module="", entry_attr="": CodeBundle(
+        lambda s, stories, us, entry_module="", entry_attr="", feedback="", followup="": CodeBundle(
             files=dict(files or UI_FILES)
         ),
     )
@@ -160,6 +162,48 @@ def test_ui_artifacts_are_written(monkeypatch, tmp_path):
     assert '"ui_files"' in (out / "summary.json").read_text()
 
 
+def test_full_stack_run_serves_its_own_interface(monkeypatch, tmp_path):
+    """The app hosts its interface, so the sandbox runs the product itself.
+
+    A full-stack run keeps the generated files inside the app package
+    (``code/static/``), because the app is what serves them, and the boot
+    check asks the application to answer at "/" -- not merely to import.
+    """
+    from agents import designer
+    from graph import workflow as Workflow
+
+    monkeypatch.setattr(
+        designer,
+        "stories_to_spec",
+        lambda stories, requirement="", plan=None, want_ui=False: ApiSpec(
+            openapi_yaml=SPEC_YAML,
+            endpoints=["/recipes"],
+            entrypoint="main.py",
+            files=["main.py"],
+            domain_terms=["recipes"],
+            kind="fullstack",
+        ),
+    )
+    _stub_ui(monkeypatch)
+    asked: dict[str, bool] = {}
+
+    def boot(code, timeout=60, public_api=None, web_root=False):
+        asked["web_root"] = web_root
+        return True, "boot-ok"
+
+    monkeypatch.setattr(Workflow.Runner, "boot_check", boot)
+    out = tmp_path / "fullstack"
+    st = run_team("Build a recipe app", out_dir=str(out))
+
+    assert st.status == "accepted", st.status
+    assert st.spec.kind == "fullstack"
+    # A full-stack app always ships an interface, even without the option.
+    assert st.spec.has_ui is True
+    assert asked["web_root"] is True, "the boot check did not ask for the page at /"
+    assert (out / "code" / "static" / "index.html").exists()
+    assert not (out / "ui").exists(), "the interface must live inside the app"
+
+
 def test_a_failed_gate_leaves_the_status_accepted(monkeypatch, tmp_path):
     """The headline guarantee: a bad UI is reported, never fatal."""
     _stub_ui(
@@ -178,6 +222,51 @@ def test_a_failed_gate_leaves_the_status_accepted(monkeypatch, tmp_path):
     assert st.ui_report.ok is False
     assert [c.name for c in st.ui_report.failures] == ["missing_files", "rooted_url"]
     assert st.error == ""
+
+
+def test_ui_repair_pass_keeps_a_better_second_attempt(monkeypatch, tmp_path):
+    """A gate failure triggers one targeted rewrite, and only a better one wins."""
+    _stub_ui(monkeypatch)
+    bad = {"index.html": "<html>", "app.js": "x", "styles.css": ""}
+    builds = iter([CodeBundle(files=bad), CodeBundle(files=dict(UI_FILES))])
+    reports = iter(
+        [
+            UiReport(
+                ok=False,
+                checks=[
+                    UiCheck(
+                        name="stylesheet_link",
+                        ok=False,
+                        detail="index.html does not link a stylesheet",
+                    )
+                ],
+            ),
+            UiReport(ok=True, checks=[UiCheck(name="stylesheet_link", ok=True)]),
+        ]
+    )
+    seen_feedback = {}
+
+    def build(*a, **k):
+        seen_feedback["last"] = k.get("feedback", "")
+        return next(builds)
+
+    monkeypatch.setattr(ui, "build_ui", build)
+    monkeypatch.setattr(ui, "gate", lambda *a, **k: next(reports))
+    events = []
+    st = run_team(
+        RECIPE,
+        out_dir=str(tmp_path / "repair"),
+        want_ui=True,
+        on_event=lambda *a: events.append(a),
+    )
+
+    assert st.ui_report is not None and st.ui_report.ok
+    assert set(st.ui_code.files) == set(UI_FILES)
+    assert "stylesheet_link" in seen_feedback["last"]
+    repaired = [
+        e for e in events if e[0] == "ui_developer" and e[1] == "done" and e[2].get("repaired")
+    ]
+    assert repaired, "the repair pass was not announced"
 
 
 def test_ui_generation_failure_leaves_the_status_accepted(monkeypatch, tmp_path):
@@ -219,7 +308,7 @@ def test_program_projects_skip_the_ui(monkeypatch, tmp_path):
     monkeypatch.setattr(
         designer,
         "stories_to_spec",
-        lambda stories, requirement="", plan=None: ApiSpec(
+        lambda stories, requirement="", plan=None, want_ui=False: ApiSpec(
             openapi_yaml="",
             endpoints=[],
             entrypoint="game.py",

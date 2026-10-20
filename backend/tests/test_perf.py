@@ -96,7 +96,9 @@ def test_gemini_truncated_when_finish_reason_is_MAX_TOKENS():
     assert _gemini_truncated(out, 8192) == ""
 
     # Truncated - MAX_TOKENS
-    out = {"candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": [{"text": "partial"}]}}]}
+    out = {
+        "candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": [{"text": "partial"}]}}]
+    }
     result = _gemini_truncated(out, 8192)
     assert result != ""
     assert "MAX_TOKENS" in result
@@ -187,7 +189,11 @@ def test_llm_call_state_is_thread_local():
         state.model = f"model-{tag}"
         state.prompt_tokens = tag * 10
         state.completion_tokens = tag * 20
-        publish_last_call(model=state.model, prompt_tokens=state.prompt_tokens, completion_tokens=state.completion_tokens)
+        publish_last_call(
+            model=state.model,
+            prompt_tokens=state.prompt_tokens,
+            completion_tokens=state.completion_tokens,
+        )
         results[tag] = last_call()
 
     t1 = threading.Thread(target=worker, args=(1,))
@@ -214,12 +220,16 @@ def test_truncation_is_recorded_in_call_failures():
     _CALL.failures.clear()
 
     # Simulate a truncation being noted
-    _note_failure("gemini/test", RuntimeError("truncated at maxOutputTokens=8192 (finishReason=MAX_TOKENS)"))
+    _note_failure(
+        "gemini/test", RuntimeError("truncated at maxOutputTokens=8192 (finishReason=MAX_TOKENS)")
+    )
     assert len(_CALL.failures) == 1
     assert "MAX_TOKENS" in _CALL.failures[0]
     assert "8192" in _CALL.failures[0]
 
-    _note_failure("openai/test", RuntimeError("truncated at max_tokens=4096 (finish_reason=length)"))
+    _note_failure(
+        "openai/test", RuntimeError("truncated at max_tokens=4096 (finish_reason=length)")
+    )
     assert len(_CALL.failures) == 2
     assert "length" in _CALL.failures[1]
     assert "4096" in _CALL.failures[1]

@@ -4,6 +4,7 @@ import type { ReactNode } from 'react';
 
 import { cn } from '../../lib/cn';
 import { Button } from './Button';
+import { Icon } from './Icon';
 
 export interface ModalProps {
   open: boolean;
@@ -131,8 +132,15 @@ export function Modal({
         // A click inside must not reach the backdrop's cancel handler.
         onClick={e => e.stopPropagation()}
       >
-        <h2 id={titleId}>{title}</h2>
-        <div>{children}</div>
+        <div className="modal-head">
+          {confirmVariant === 'danger' && (
+            <span className="modal-icon" aria-hidden="true">
+              <Icon name="warning" size={18} />
+            </span>
+          )}
+          <h2 id={titleId}>{title}</h2>
+        </div>
+        <div className="modal-body">{children}</div>
         <div className={cn('modal-actions')}>
           <Button variant="ghost" disabled={busy} onClick={onCancel}>
             {cancelLabel}

@@ -23,7 +23,7 @@ from app.services.playground import (
 
 APP_PY = """from fastapi import FastAPI
 
-app = FastAPI(items=["one"])
+app = FastAPI()
 
 
 @app.get("/health")
@@ -125,6 +125,161 @@ def test_start_is_idempotent(service, run_dir):
     assert first.state == "running"
     again = service.start("run-1")
     assert again.port == first.port, "a second start took a second port"
+
+
+def test_entry_path_opens_the_shipped_ui_at_the_gateway_root(service, run_dir):
+    """A full-stack run must be framed at '/', not its first JSON endpoint.
+
+    The preview panel points the iframe at ``entry_path``. The old answer was
+    the spec's first route (``/items``), so a shipped UI rendered raw JSON and
+    read as "the preview is broken".
+    """
+    (run_dir / "ui").mkdir()
+    (run_dir / "ui" / "index.html").write_text("<!doctype html><title>Items</title>")
+    session = _wait_running(service, "run-1")
+    assert session.state == "running", session.error
+    assert session.entry_path == "/"
+
+
+def test_probe_paths_skips_post_only_and_templated_routes(tmp_path):
+    """The probe sends GET: POST-only and literal-brace paths cannot succeed."""
+    from app.services.playground import _probe_paths
+
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "spec.yaml").write_text(
+        "openapi: 3.1.0\n"
+        "info: {title: Game, version: 1.0.0}\n"
+        "paths:\n"
+        "  /games:\n    post:\n      responses: {'201': {description: created}}\n"
+        "  /games/{gameId}:\n    get:\n      responses: {'200': {description: ok}}\n"
+        "  /scores:\n    get:\n      responses: {'200': {description: ok}}\n"
+    )
+    paths = _probe_paths(run)
+    assert paths[0] == "/scores"
+    assert "/games" not in paths
+    assert not any("{" in p for p in paths)
+
+
+# --------------------------------------------------------------- full stack ----
+FULLSTACK_APP = """from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+import os
+
+app = FastAPI()
+static_dir = Path(__file__).parent / "static"
+os.makedirs(static_dir, exist_ok=True)
+(static_dir / "index.html").write_text(
+    "<!doctype html><html><head><title>Items</title></head>"
+    '<body><main id="root"></main></body></html>'
+)
+
+
+@app.get("/api/items")
+def items():
+    return ["one", "two"]
+
+
+app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="web")
+"""
+
+
+def _fullstack_run(runs_root, name="fs-1", app_source=FULLSTACK_APP):
+    """A run directory shaped like a full-stack application."""
+    d = runs_root / name
+    (d / "code").mkdir(parents=True)
+    (d / "code" / "main.py").write_text(app_source)
+    (d / "spec.yaml").write_text(SPEC_YAML)
+    (d / "plan.json").write_text(
+        json.dumps({"kind": "fullstack", "entrypoint": "main.py", "has_ui": True})
+    )
+    return d
+
+
+def test_a_full_stack_app_is_framed_at_its_own_root(service, runs_root):
+    """The app serves its interface, so the preview opens the product."""
+    d = _fullstack_run(runs_root)
+    session = _wait_running(service, d.name)
+    assert session.state == "running", session.error
+    assert session.entry_path == "/"
+
+
+def test_a_full_stack_probe_leads_with_the_page(tmp_path):
+    from app.services.playground import _probe_paths
+
+    run = tmp_path / "fs"
+    run.mkdir()
+    (run / "spec.yaml").write_text(SPEC_YAML)
+    (run / "plan.json").write_text(json.dumps({"kind": "fullstack"}))
+    paths = _probe_paths(run)
+    assert paths[0] == "/"
+
+
+def test_a_full_stack_app_that_serves_no_page_is_reported_as_crashed(runs_root):
+    """A backend wearing a full-stack label must not look like a working app.
+
+    The person opened this to use the product; showing them a 404 (or raw
+    JSON) while calling the preview "running" is the failure this catches.
+    """
+    svc = PlaygroundService(
+        Settings(runs_dir=runs_root, preview_boot_timeout_seconds=3),
+        runs_dir=runs_root,
+    )
+    try:
+        d = _fullstack_run(runs_root, name="fs-nopage", app_source=APP_PY)
+        session = svc.start(d.name)
+        assert session.state == "crashed"
+        assert "did not serve its page at /" in (session.error or "")
+    finally:
+        svc.shutdown()
+
+
+def test_a_full_stack_page_without_a_mount_point_is_not_called_running(runs_root):
+    """A page with nothing to render into is a blank frame, not a working app."""
+    blank = FULLSTACK_APP.replace(
+        '<body><main id="root"></main></body>', "<body><h1>Items</h1></body>"
+    )
+    svc = PlaygroundService(
+        Settings(runs_dir=runs_root, preview_boot_timeout_seconds=3),
+        runs_dir=runs_root,
+    )
+    try:
+        d = _fullstack_run(runs_root, name="fs-blank", app_source=blank)
+        session = svc.start(d.name)
+        assert session.state == "crashed"
+    finally:
+        svc.shutdown()
+
+
+POST_ONLY_APP = """from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.post("/items")
+def add(item: dict):
+    return {"added": item.get("name", "")}
+"""
+
+
+def test_post_only_app_boots_even_though_get_probes_answer_404(service, runs_root):
+    """A healthy POST-only API was reported crashed because probes demand 200.
+
+    Every GET probe answers 404/405; the server is up, and the preview must
+    boot instead of showing "the app did not answer".
+    """
+    d = runs_root / "run-post"
+    (d / "code").mkdir(parents=True)
+    (d / "code" / "main.py").write_text(POST_ONLY_APP)
+    (d / "spec.yaml").write_text(
+        "openapi: 3.1.0\n"
+        "info: {title: Items, version: 1.0.0}\n"
+        "paths:\n"
+        "  /items:\n    post:\n      responses: {'201': {description: ok}}\n"
+    )
+    session = _wait_running(service, "run-post")
+    assert session.state == "running", session.error
+    assert session.entry_path == "/"
 
 
 def test_stop_kills_the_process_and_clears_the_directory(service, run_dir):

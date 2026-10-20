@@ -26,11 +26,27 @@ _API_SOP = (
     "- The application module is `{module}` and the ASGI app object is `{module}.{attr}`.\n"
     "- Start with `import {module}` and use `{module}.{attr}` with fastapi.testclient.TestClient.\n"
     "- NEVER construct your own FastAPI() or APIRouter(); that would test a stub, not the app.\n"
+    "- Call the paths EXACTLY as the spec writes them. Never add a global prefix such as "
+    "`/api` when the spec says `/tables`, never rename a path, and never invent an endpoint. "
+    "The spec's paths are the contract; a suite that calls different paths is rejected.\n"
     "- Point the app at a throwaway SQLite file via the database path the code reads, "
     "and delete stale test databases before importing.\n"
-    "- Cover, for every endpoint: the success path, the validation/error status codes the "
-    "spec declares (e.g. 404 for unknown ids, 422 for missing fields), and at least one "
-    "boundary case.\n"
+    "- Write at least {min_tests} test functions. A suite with fewer is rejected and "
+    "rewritten. Do not pad with tautologies (`assert True`) or tests that never call "
+    "the application: every test must be able to fail for a real defect.\n"
+    "Depth requirements — this is a product suite, not a smoke test:\n"
+    "- For EVERY endpoint: one success test, and at least one validation/failure test "
+    "whenever the spec declares an error response for it.\n"
+    "- For every resource: a lifecycle test that creates, reads, mutates and lists it, "
+    "asserting that each mutation persisted and that the returned id is reused.\n"
+    "- Validation: missing required fields, wrong types, out-of-range values, unknown "
+    "ids, duplicate/conflict cases the spec declares, and one malformed or empty JSON "
+    "body.\n"
+    "- Boundaries: empty collections before creation, a single item, pagination limits "
+    "if declared, empty strings, and numeric min/max limits.\n"
+    "- Assert that neither valid nor invalid client requests ever return a 5xx status.\n"
+    "- Tests must be independent and deterministic: create the state each test needs, "
+    "never rely on wall-clock timing or on execution order.\n"
     "Assert ONLY what the spec states. In particular:\n"
     "- Read the spec's validation rules BEFORE writing a success-path test. Every declared "
     "constraint must hold in your payload: required fields present, formats valid, values in "
@@ -79,6 +95,9 @@ _PROGRAM_SOP = (
     "- For each required behaviour, write at least one test that would fail if that "
     "behaviour were broken. Cover the main path plus edge cases: empty state, invalid "
     "input, boundary values, win/lose conditions, and state that must not change.\n"
+    "- Write at least {min_tests} test functions. A suite with fewer is rejected and "
+    "rewritten. Include a full game/program lifecycle, illegal actions, and boundary "
+    "conditions; do not pad with tautologies.\n"
     "- Test properties rather than incidental details: types and ranges, membership, "
     "counts, ordering, and that illegal actions are rejected.\n"
     "Output ONE fenced ```python block containing only the test file. No prose."
@@ -87,6 +106,62 @@ _PROGRAM_SOP = (
 
 _FABRICATES_APP = re.compile(r"=\s*(?:FastAPI|APIRouter)\s*\(", re.M)
 _IMPORTS_TARGET = re.compile(r"^\s*(?:import\s+{m}\b|from\s+{m}\s+import)", re.M)
+_TEST_DEF = re.compile(r"(?m)^\s*(?:async\s+)?def\s+test_\w+\s*\(")
+_PATH_LITERAL = re.compile(r"([\"'])(/[^\"'\n]*)\1")
+_UTILITY_ROOTS = {
+    "health",
+    "docs",
+    "redoc",
+    "openapi.json",
+    # Absolute filesystem paths show up in generated fixture code (SQLite
+    # files, temp dirs). They are not HTTP paths and must not be mistaken for
+    # an invented API prefix.
+    "tmp",
+    "var",
+    "usr",
+    "home",
+    "root",
+    "app",
+    "data",
+    "dev",
+    "etc",
+    "opt",
+    "mnt",
+    "srv",
+    "proc",
+    "workspace",
+}
+
+
+def _test_function_count(body: str) -> int:
+    """How many test functions the reply declares.
+
+    Parameterised tests count once here even though they expand at runtime;
+    that makes this a deliberate lower bound, not a coverage measurement.
+    """
+    return len(_TEST_DEF.findall(body))
+
+
+def _invented_path_roots(body: str, paths: set[str]) -> list[str]:
+    """Root segments the suite calls that the spec never declares.
+
+    A model that has seen many examples likes to prepend ``/api`` to every
+    path. That is worse than a style bug: the Developer follows the failing
+    tests, moves the app to ``/api``, and the delivered API no longer matches
+    its own contract. One observed run burned four Developer retries this way.
+    Utility paths (``/health``, ``/docs``, ...) are legitimate probes.
+    """
+    declared = {p.strip("/").split("/")[0] for p in paths if p.strip("/")}
+    if not declared:
+        return []
+    invented: set[str] = set()
+    for match in _PATH_LITERAL.finditer(body):
+        raw = match.group(2).split("?", 1)[0].strip()
+        root = raw.strip("/").split("/")[0]
+        if not root or root in declared or root in _UTILITY_ROOTS:
+            continue
+        invented.add("/" + root)
+    return sorted(invented)
 
 
 def _tests_the_real_app(body: str, module: str) -> bool:
@@ -127,32 +202,62 @@ def spec_to_tests(
 def _api_tests(spec: ApiSpec, listing: str, entry_module: str, entry_attr: str) -> TestSuite:
     if not entry_module:
         raise GenerationError("Tester needs the application entrypoint, which was not resolved")
-    pairs, _paths = spec_paths(spec.openapi_yaml)
+    pairs, paths = spec_paths(spec.openapi_yaml)
     endpoint_list = (
         "\n".join(f"- {m} {p}" for p, m in sorted(pairs)) or "(read from the spec below)"
     )
     codes = sorted(_status_codes_in_spec(spec.openapi_yaml))
+    # Two tests per endpoint is the floor; small APIs still get a full lifecycle
+    # and validation suite. Capped so a 30-endpoint spec does not demand 60
+    # near-identical tests.
+    min_tests = max(8, min(24, 2 * len(pairs)))
     prompt = (
-        f"Spec:\n{spec.openapi_yaml[:6000]}\n\n"
+        f"Spec:\n{spec.openapi_yaml[:16000]}\n\n"
         f"Endpoints:\n{endpoint_list}\n\n"
         f"Stories:\n{listing}\n\n"
         f"Error status codes the spec declares: {codes or 'none explicitly'}\n"
         f"Application module: {entry_module} (app object: {entry_module}.{entry_attr})\n"
     )
-    text, _meta = require(
-        f"{prompt}Emit the pytest file.",
-        _API_SOP.format(module=entry_module, attr=entry_attr),
-        role="tester",
-    )
-    body = strip_fence(text)
-    if "def test_" not in body:
-        raise GenerationError("Tester produced no test functions")
-    if not _tests_the_real_app(body, entry_module):
-        raise GenerationError(
-            f"Tester suite does not import {entry_module!r} or declares its own FastAPI app, "
-            "so it would not exercise the generated application"
+    problem = ""
+    for attempt in range(2):
+        extra = (
+            ""
+            if attempt == 0
+            else (
+                f"\nYour previous suite was rejected: {problem}. Rewrite the complete "
+                f"file, obey every rule, and include at least {min_tests} test functions.\n"
+            )
         )
-    return TestSuite(files={"test_app.py": body})
+        text, _meta = require(
+            f"{prompt}{extra}Emit the pytest file.",
+            _API_SOP.format(module=entry_module, attr=entry_attr, min_tests=min_tests),
+            role="tester",
+        )
+        body = strip_fence(text)
+        if "def test_" not in body:
+            problem = "the reply contained no test functions"
+            continue
+        if not _tests_the_real_app(body, entry_module):
+            problem = (
+                f"it does not import {entry_module!r} (or declares its own FastAPI app), "
+                "so it would not exercise the generated application"
+            )
+            continue
+        invented = _invented_path_roots(body, paths)
+        if invented:
+            problem = (
+                f"it calls paths under the undeclared prefix(es) {invented}; use only "
+                "the spec's exact paths"
+            )
+            continue
+        count = _test_function_count(body)
+        if count < min_tests:
+            problem = f"it had {count} test functions but at least {min_tests} are required"
+            continue
+        return TestSuite(files={"test_app.py": body})
+    raise GenerationError(
+        "Tester could not produce a usable suite after 2 attempts: " + (problem or "unknown")
+    )
 
 
 def _program_tests(spec: ApiSpec, listing: str, code: CodeBundle | None = None) -> TestSuite:
@@ -166,7 +271,7 @@ def _program_tests(spec: ApiSpec, listing: str, code: CodeBundle | None = None) 
         behaviours = []
     behaviour_lines = "\n".join(f"- {b}" for b in behaviours) or "- see the contract"
     prompt = (
-        f"Contract:\n{spec.contract_text[:6000]}\n\n"
+        f"Contract:\n{spec.contract_text[:12000]}\n\n"
         f"Public names to import (defined across these modules):\n{public}\n\n"
         f"Required behaviours, each needing at least one test:\n{behaviour_lines}\n\n"
         f"Expected behaviours from the requirement:\n{listing}\n\n"
@@ -182,24 +287,43 @@ def _program_tests(spec: ApiSpec, listing: str, code: CodeBundle | None = None) 
                 f"leads only):\n{surface}\n\nMatch your assertions to these signatures. Do not "
                 "assume a different data shape.\n"
             )
-    text, _meta = require(
-        f"{prompt}Emit the pytest file.",
-        _PROGRAM_SOP.format(public_api=public),
-        role="tester",
+    min_tests = 10
+    problem = ""
+    for attempt in range(2):
+        extra = (
+            ""
+            if attempt == 0
+            else (
+                f"\nYour previous suite was rejected: {problem}. Rewrite the complete "
+                f"file, obey every rule, and include at least {min_tests} test functions.\n"
+            )
+        )
+        text, _meta = require(
+            f"{prompt}{extra}Emit the pytest file.",
+            _PROGRAM_SOP.format(public_api=public, min_tests=min_tests),
+            role="tester",
+        )
+        body = strip_fence(text)
+        if "def test_" not in body:
+            problem = "the reply contained no test functions"
+            continue
+        if not _imports_public_api(body, spec):
+            problem = (
+                "it did not import the declared public interface, so it would not exercise "
+                "the generated program"
+            )
+            continue
+        if re.search(r"=\s*(?:FastAPI|APIRouter)\s*\(", body):
+            problem = "it built its own web app, but this project is a program, not a service"
+            continue
+        count = _test_function_count(body)
+        if count < min_tests:
+            problem = f"it had {count} test functions but at least {min_tests} are required"
+            continue
+        return TestSuite(files={"test_program.py": body})
+    raise GenerationError(
+        "Tester could not produce a usable suite after 2 attempts: " + (problem or "unknown")
     )
-    body = strip_fence(text)
-    if "def test_" not in body:
-        raise GenerationError("Tester produced no test functions")
-    if not _imports_public_api(body, spec):
-        raise GenerationError(
-            "Tester suite does not import the declared public interface, so it would not "
-            "exercise the generated program"
-        )
-    if re.search(r"=\s*(?:FastAPI|APIRouter)\s*\(", body):
-        raise GenerationError(
-            "Tester suite builds its own web app, but this project is a program, not a service"
-        )
-    return TestSuite(files={"test_program.py": body})
 
 
 def _imports_public_api(body: str, spec: ApiSpec) -> bool:

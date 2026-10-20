@@ -58,7 +58,7 @@ skip_if_no_image = pytest.mark.skipif(
 # ------------------------------------------------------------------------ generated app + spec ---
 APP_PY = """from fastapi import FastAPI
 
-app = FastAPI(items=["one"])
+app = FastAPI()
 
 
 @app.get("/health")
@@ -83,6 +83,7 @@ SPEC_YAML = (
     "  /health:\n    get:\n      responses: {'200': {description: ok}}\n"
     "  /items:\n    get:\n      responses: {'200': {description: ok}}\n"
 )
+
 
 # ------------------------------------------------------------------------ fixtures ---
 @pytest.fixture()
@@ -211,6 +212,7 @@ def test_crash_restart_recovers_a_container_preview(client):
     _start(client)
 
     from app.services.playground import get_playground
+
     svc = get_playground()
 
     # Get the internal session to find the container_id
