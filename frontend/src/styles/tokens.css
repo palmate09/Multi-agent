@@ -2,150 +2,196 @@
    Design tokens — the single source of truth for every colour, type, space,
    radius, elevation, z-index and motion value in the app.
 
-   Names follow the W3C Design Tokens Community Group format where it is
-   practical. Nothing outside this file may hard-code one of these values.
+   Nothing outside this file may hard-code one of these values: components
+   and styles.css only ever say `var(--token)`. That rule is what makes a
+   theme a block of overrides here and nothing else.
+
+   THEMES
+   Two themes ship: "dark" (the default block on :root) and "light" (the
+   [data-theme='light'] block below). `lib/theme.ts` sets the data-theme
+   attribute on <html>; index.html sets it before first paint so a light-mode
+   user never sees a dark flash. Adding a third theme is one more block that
+   redefines the COLOUR section — typography, spacing, radius and motion are
+   shared and must not be repeated per theme.
 
    CONTRAST
    Every foreground/background pair below was measured as an sRGB ratio against
-   the surface it actually sits on, and the threshold it has to clear is named
-   in the comment. WCAG 2.2 AA: 4.5:1 for text below 24px (18.7px bold),
-   3:1 for text at that size and for any non-text UI boundary (SC 1.4.11).
+   the surface it actually sits on, in BOTH themes, and the threshold it has to
+   clear is named in the comment. WCAG 2.2 AA: 4.5:1 for text below 24px
+   (18.7px bold), 3:1 for large text and for any non-text UI boundary
+   (SC 1.4.11). The surfaces are: --color-bg-canvas (the page),
+   --color-bg-surface (cards, the topbar), --color-bg-inset (code, inputs, the
+   metrics strip).
 
-   The surfaces are: --color-bg-canvas (the page), --color-bg-surface (cards,
-   the topbar), --color-bg-inset (code blocks, stat tiles, inputs).
-
-   Dark theme only, deliberately: this is a single-operator developer console.
-   A light theme is appended as a [data-theme="light"] block below and will
-   need no component change, because no component knows a colour value.
+   Status is never colour-only: every status colour is paired with a word, and
+   most with an icon.
    ========================================================================== */
 
 :root {
+  /* ======================================================================
+     COLOUR — dark theme ("graphite"). Neutral, slightly cool charcoal with
+     a sky accent: calm enough to leave open all day beside a terminal.
+     ====================================================================== */
   color-scheme: dark;
 
   /* ---- surfaces ---------------------------------------------------------- */
 
-  --color-bg-canvas: #0b0f16;
-  --color-bg-surface: #121826;
-  --color-bg-inset: #0d121c;
+  --color-bg-canvas: #16181b;
+  --color-bg-surface: #1e2125;
+  --color-bg-inset: #121417;
+  /* Anything that floats above the page: dialogs, toasts, menus. */
+  --color-bg-raised: #262a2f;
 
   /* Interactive surface states. */
-  --color-surface-hover: #1a2333;
-  --color-surface-selected: #161b2e;
+  --color-surface-hover: #292d33;
+  --color-surface-selected: rgba(56, 189, 248, 0.1);
 
-  /* The preview iframe shows a *generated* app, which is always light. This is
-     the one light surface in the product and it belongs to the sandbox, not us. */
+  /* The preview iframe shows a *generated* app, which is always light. It is
+     the one light surface in the dark theme and it belongs to the sandbox,
+     not to us. */
   --color-preview-surface: #ffffff;
 
-  /* Scrim behind a modal. */
-  --color-overlay: rgba(0, 0, 0, 0.55);
+  /* Scrim behind a modal or the mobile drawer. */
+  --color-overlay: rgba(0, 0, 0, 0.6);
 
   /* ---- borders ----------------------------------------------------------- */
 
   /* Decorative only: card edges, dividers, table rules. A card is separated
-     from the page by its FILL (surface vs canvas is 1.08:1) and its edge is
-     decoration, so SC 1.4.11 does not apply. Raising it to 3:1 would make the
-     1px line the only thing distinguishing a card from the page. */
-  --color-border-default: #1f2937;
+     from the page by its FILL and its edge is decoration, so SC 1.4.11 does
+     not apply. Raising it to 3:1 would make the 1px line the only thing
+     distinguishing a card from the page. */
+  --color-border-default: #2c3036;
+  --color-border-strong: #3b4047;
 
   /* Interactive: input and button outlines, where the boundary is what tells
-     the user where to click. 3.09:1 on surface, 3.26:1 on inset. */
-  --color-border-control: #5a677a;
+     the user where to click. 3.5:1 on surface, 4.0:1 on inset. */
+  --color-border-control: #6c7682;
 
   /* ---- text -------------------------------------------------------------- */
 
-  --color-text-primary: #e5eaf2; /* 15.9:1 canvas, 14.7:1 surface */
-  --color-text-secondary: #94a3b8; /* 7.5:1 canvas, 6.9:1 surface */
-  /* Was #64748b at 4.03:1 — below AA. It carries every hint, empty state,
-     field label and timestamp, so this one was load-bearing, not decorative. */
-  --color-text-tertiary: #78899f; /* 5.4:1 canvas, 5.0:1 surface */
+  --color-text-primary: #eceff3; /* 15.4:1 canvas, 14.0:1 surface */
+  --color-text-secondary: #a9b2bd; /* 8.3:1 canvas, 7.5:1 surface */
+  /* Measured on every background it sits on, including interactive states:
+     6.4:1 canvas, 5.8:1 surface, 6.6:1 inset, 5.0:1 hovered row, 4.8:1 selected row. */
+  --color-text-tertiary: #929ca7;
 
-  /* Text drawn on top of a filled button. */
+  /* Text drawn on a filled danger button. */
   --color-on-solid: #ffffff;
 
   /* ---- accent ------------------------------------------------------------ */
 
-  /* Non-text use only: focus rings, active edges, the timeline's current node.
-     4.3:1 canvas / 4.2:1 inset, clears the 3:1 SC 1.4.11 bar. */
-  --color-accent: #6366f1;
+  /* Non-text use only: focus rings, active edges, the live pipeline stage.
+     7.5:1 on surface. */
+  --color-accent: #38bdf8;
 
-  /* The accent as TEXT. The base accent is only 4.30:1 on canvas, short of
-     4.5:1, which is why small accent-coloured text needs its own token rather
-     than a rebrand of --color-accent. 5.9:1 surface, 6.3:1 inset. */
-  --color-accent-text: #818cf8;
+  /* The accent as TEXT: links, the active file name. 9.7:1 on surface. */
+  --color-accent-text: #7dd3fc;
 
-  /* Filled primary button. White on the base accent was 4.47:1 — a fail by
-     0.03 — so the fill is a shade deeper: 5.7:1 with white, 3.1:1 against the
-     card it sits on. */
-  --color-accent-solid: #5457d6;
-  --color-accent-solid-hover: #5b5ee0; /* lighter, as it already was */
+  /* Filled primary button. In the dark theme the fill is the bright accent and
+     the label is dark: 7.8:1, and 7.5:1 against the card it sits on. */
+  --color-accent-solid: #38bdf8;
+  --color-accent-solid-hover: #5ccbfa;
+  --color-accent-solid-active: #22a8e3;
+  --color-on-accent: #04202d;
 
-  --color-accent-surface: rgba(99, 102, 241, 0.1);
-  --color-accent-surface-weak: rgba(99, 102, 241, 0.07);
-  --color-accent-surface-subtle: rgba(99, 102, 241, 0.08);
-  --color-accent-border: rgba(99, 102, 241, 0.3);
-  /* Text on the subtle accent wash (an advisory note). 11.0:1. */
-  --color-accent-on-surface: #c7d2fe;
+  --color-accent-surface: rgba(56, 189, 248, 0.1);
+  --color-accent-surface-weak: rgba(56, 189, 248, 0.06);
+  --color-accent-border: rgba(56, 189, 248, 0.35);
+  /* Text on the accent wash (an advisory note). 11:1. */
+  --color-accent-on-surface: #cdeefd;
 
   /* ---- status ------------------------------------------------------------ */
 
-  --color-status-success: #10b981; /* dot/border, 7.0:1 surface */
-  --color-status-success-text: #6ee7b7; /* 9.7:1 on the tinted fill */
-  --color-status-success-surface: rgba(16, 185, 129, 0.12);
-  --color-status-success-border: rgba(16, 185, 129, 0.3);
+  --color-status-success: #4ade80; /* dot / icon, 9.3:1 surface */
+  --color-status-success-text: #86efac; /* 8.9:1 on the tinted fill */
+  --color-status-success-surface: rgba(74, 222, 128, 0.12);
+  --color-status-success-border: rgba(74, 222, 128, 0.32);
 
-  --color-status-warning: #f59e0b; /* 8.3:1 surface */
-  --color-status-warning-text: #fcd34d; /* 10.1:1 on the tinted fill */
-  --color-status-warning-surface: rgba(245, 158, 11, 0.12);
-  --color-status-warning-surface-strong: rgba(245, 158, 11, 0.15);
-  --color-status-warning-border: rgba(245, 158, 11, 0.3);
+  --color-status-warning: #fbbf24; /* 9.7:1 surface */
+  --color-status-warning-text: #fcd34d; /* 8.6:1 on the tinted fill */
+  --color-status-warning-surface: rgba(251, 191, 36, 0.12);
+  --color-status-warning-border: rgba(251, 191, 36, 0.32);
 
-  --color-status-danger: #ef4444; /* dot/border, 4.7:1 surface */
-  --color-status-danger-text: #fca5a5; /* 8.4:1 on the tinted fill */
-  --color-status-danger-surface: rgba(239, 68, 68, 0.1);
-  --color-status-danger-surface-badge: rgba(239, 68, 68, 0.12);
-  --color-status-danger-border: rgba(239, 68, 68, 0.35);
-  --color-status-danger-border-badge: rgba(239, 68, 68, 0.3);
+  --color-status-danger: #f87171; /* 5.8:1 surface */
+  --color-status-danger-text: #fca5a5; /* 7.4:1 on the tinted fill */
+  --color-status-danger-surface: rgba(248, 113, 113, 0.1);
+  --color-status-danger-border: rgba(248, 113, 113, 0.38);
 
-  /* Neutral severity ("minor"). */
-  --color-status-neutral-surface: rgba(100, 116, 139, 0.18);
+  /* Neutral severity ("minor") and idle states. */
+  --color-status-neutral-surface: rgba(146, 156, 167, 0.16);
 
-  /* A destructive action, as a filled button. 6.5:1 with white. */
-  --color-danger-solid: #b3261e;
-  --color-danger-solid-hover: #8f1d17;
+  /* A destructive action, as a filled button. 5.0:1 with white. */
+  --color-danger-solid: #d32f2f;
+  --color-danger-solid-hover: #b92626;
+
+  /* ---- syntax highlighting ----------------------------------------------- */
+
+  /* Each clears 4.5:1 on both the code surface and the card. */
+  --syntax-keyword: #c4a7f5;
+  --syntax-string: #8fd694;
+  --syntax-comment: #929ca7;
+  --syntax-number: #f0b072;
+  --syntax-function: #7cc4f5;
+  --syntax-key: #7dd3fc;
+
+  /* ---- elevation --------------------------------------------------------- */
+
+  /* Cards are flat (a fill and a hairline). Only things that float get a
+     shadow, so a shadow always means "this is above the page". */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-3: 0 24px 64px rgba(0, 0, 0, 0.6);
+
+  /* ---- focus ------------------------------------------------------------- */
+
+  /* 9.7:1 against a card, 10.7:1 against the canvas. The offset holds the ring
+     off a filled button's edge, so the colour it is adjacent to is the card. */
+  --focus-ring-color: #7dd3fc;
+
+  /* ======================================================================
+     SHARED — identical in every theme.
+     ====================================================================== */
 
   /* ---- typography -------------------------------------------------------- */
 
-  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  /* System stacks on purpose: the console ships behind a strict CSP
+     (font-src 'self') and must work offline, so there is no web font to
+     download. To self-host a face, add an @font-face and put its name first
+     in these two tokens — nothing else changes. */
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI Variable Text', 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --font-mono:
+    ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Code', Menlo, Consolas,
+    'Liberation Mono', monospace;
 
-  --font-size-2xs: 10px; /* table headers, stat labels, severity pills */
-  --font-size-xs: 11px; /* badges, field labels, timestamps */
-  --font-size-sm: 12px; /* secondary body, hints */
-  --font-size-md: 13px; /* code, empty states, table body */
+  /* Nothing below 11px; nothing a person has to read is below 12px. */
+  --font-size-2xs: 11px; /* count pills, severity tags */
+  --font-size-xs: 12px; /* badges, field labels, timestamps, table headers */
+  --font-size-sm: 13px; /* secondary body, hints */
+  --font-size-code: 13px; /* code and logs */
   --font-size-base: 14px; /* body */
-  --font-size-lg: 15px; /* the topbar wordmark */
-  --font-size-xl: 20px; /* stat values */
-  --font-size-2xl: 24px; /* reserved: page-level headings */
+  --font-size-lg: 16px; /* card titles */
+  --font-size-xl: 22px; /* metric values */
+  --font-size-2xl: 28px; /* the page title when no run is open */
 
-  /* 650 was a variable-font weight. System font stacks are not variable, so it
-     rounded differently on every platform; 600 is what it was reaching for. */
   --font-weight-regular: 400;
   --font-weight-medium: 500;
   --font-weight-semibold: 600;
   --font-weight-bold: 700;
 
   --line-height-body: 1.55;
-  --line-height-code: 1.5;
+  --line-height-tight: 1.25;
+  --line-height-code: 1.6;
 
-  --letter-spacing-tight: -0.01em;
-  --letter-spacing-caps: 0.08em;
-  --letter-spacing-caps-sm: 0.06em;
+  --letter-spacing-tight: -0.011em;
+  --letter-spacing-title: -0.02em;
 
   /* ---- spacing ----------------------------------------------------------- */
 
   /* 4px base. */
   --space-0: 0;
-  --space-hair: 2px; /* hairlines and 2px gaps */
+  --space-hair: 2px;
   --space-1: 4px;
   --space-1-5: 6px;
   --space-2: 8px;
@@ -158,64 +204,134 @@
   --space-8: 32px;
   --space-10: 40px;
   --space-12: 48px;
-  --space-15: 60px;
-
-  /* Sub-grid nudges still in use. Deliberately not folded into the scale
-     above: doing so changes table row and card heights, so consolidation waits
-     for the responsive pass (FRONTEND_IMPROVEMENT_PLAN §8). */
-  --space-opt-1: 5px;
-  --space-opt-2: 7px;
-  --space-opt-3: 9px;
-  --space-opt-4: 18px;
+  --space-16: 64px;
 
   /* ---- radius ------------------------------------------------------------ */
 
-  --radius-xs: 4px; /* severity pills */
-  --radius-sm: 5px; /* controls, list rows */
-  --radius-md: 8px; /* cards, dialogs */
-  --radius-pill: 999px; /* badges */
-
-  /* ---- elevation --------------------------------------------------------- */
-
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.45); /* dialogs over a scrim */
+  /* Different things get different radii, so the shape itself says what
+     something is: a tag is tighter than a control, a control tighter than a
+     card, a card tighter than a dialog. */
+  --radius-xs: 4px; /* severity tags, count pills' inner chips */
+  --radius-sm: 6px; /* small controls, list rows */
+  --radius-md: 8px; /* buttons, inputs, code blocks */
+  --radius-lg: 12px; /* cards */
+  --radius-xl: 16px; /* dialogs */
+  --radius-pill: 999px; /* badges, chips, the theme switch */
 
   /* ---- layout sizes ------------------------------------------------------ */
 
-  /* The topbar's height, needed by the sidebar's scroll cap and by
-     scroll-padding so a focused element is never hidden behind it.
-     WCAG 2.2 SC 2.4.11 Focus Not Obscured. */
-  --size-topbar-height: 53px;
+  --size-topbar-height: 56px;
+  --size-sidebar-width: 320px;
+  /* Long lines of prose and wide tables stop being readable well before a
+     27-inch monitor runs out of room. */
+  --size-content-max: 1120px;
+  --size-control-height: 36px;
+  --size-control-height-sm: 28px;
+  --size-icon: 16px;
 
   /* ---- z-index ----------------------------------------------------------- */
 
   --z-base: 0;
   --z-sticky: 20; /* the topbar */
+  --z-drawer: 30; /* the mobile run list, above the sticky bar */
   --z-modal: 50;
   --z-toast: 60;
 
   /* ---- motion ------------------------------------------------------------ */
 
   --duration-fast: 120ms;
-  --duration-base: 150ms;
-  --ease-standard: ease;
-  --ease-out: ease-out;
+  --duration-base: 180ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
 
   /* ---- focus ------------------------------------------------------------- */
 
   --focus-ring-width: 2px;
   --focus-ring-offset: 2px;
-  /* 8.9:1 against a card, 9.6:1 against the canvas.
-     Measured against the primary button FILL it is only 2.84:1, which is not
-     a SC 1.4.11 failure: --focus-ring-offset holds the ring 2px off the
-     button's edge, so the colour it is actually adjacent to is the card. Do
-     not "fix" this by lowering the offset. */
-  --focus-ring-color: #a5b4fc;
 }
 
-/* Respect the OS setting. Durations collapse, and the two looping animations
-   stop entirely — a pulse that never stops is exactly what this preference is
-   for. */
+/* ==========================================================================
+   COLOUR — light theme ("daylight"). A clean white-on-cool-grey surface set
+   with a deeper sky accent, so the same accent clears AA as text on white.
+   ========================================================================== */
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --color-bg-canvas: #f4f5f7;
+  --color-bg-surface: #ffffff;
+  --color-bg-inset: #f0f2f5;
+  --color-bg-raised: #ffffff;
+
+  --color-surface-hover: #edf0f3;
+  --color-surface-selected: rgba(3, 105, 161, 0.07);
+
+  --color-preview-surface: #ffffff;
+  --color-overlay: rgba(15, 23, 32, 0.45);
+
+  --color-border-default: #e1e5ea;
+  --color-border-strong: #cdd3da;
+  /* 3.9:1 on surface, 3.4:1 on inset, 3.5:1 on canvas. */
+  --color-border-control: #78838f;
+
+  --color-text-primary: #12171c; /* 16.5:1 canvas, 18.0:1 surface */
+  --color-text-secondary: #47525e; /* 7.3:1 canvas, 8.0:1 surface */
+  --color-text-tertiary: #586471; /* 5.5:1 canvas, 6.0:1 surface, 5.4:1 inset */
+
+  --color-on-solid: #ffffff;
+
+  /* 4.1:1 on surface, 3.8:1 on canvas — clears the 3:1 non-text bar. */
+  --color-accent: #0284c7;
+  /* The accent as text: 5.9:1 on surface, 5.3:1 on inset. */
+  --color-accent-text: #0369a1;
+  /* White on this fill: 5.9:1. */
+  --color-accent-solid: #0369a1;
+  --color-accent-solid-hover: #075985;
+  --color-accent-solid-active: #0c4a6e;
+  --color-on-accent: #ffffff;
+
+  --color-accent-surface: rgba(3, 105, 161, 0.08);
+  --color-accent-surface-weak: rgba(3, 105, 161, 0.05);
+  --color-accent-border: rgba(3, 105, 161, 0.3);
+  --color-accent-on-surface: #0c4a6e;
+
+  --color-status-success: #16a34a; /* 3.3:1 surface */
+  --color-status-success-text: #146c34; /* 5.7:1 on the tinted fill */
+  --color-status-success-surface: rgba(22, 163, 74, 0.1);
+  --color-status-success-border: rgba(22, 163, 74, 0.35);
+
+  --color-status-warning: #d97706; /* 3.2:1 surface */
+  --color-status-warning-text: #8a4a06; /* 6.0:1 on the tinted fill */
+  --color-status-warning-surface: rgba(217, 119, 6, 0.12);
+  --color-status-warning-border: rgba(217, 119, 6, 0.38);
+
+  --color-status-danger: #dc2626; /* 4.8:1 surface */
+  --color-status-danger-text: #b01e1e; /* 5.9:1 on the tinted fill */
+  --color-status-danger-surface: rgba(220, 38, 38, 0.08);
+  --color-status-danger-border: rgba(220, 38, 38, 0.35);
+
+  --color-status-neutral-surface: rgba(88, 100, 113, 0.12);
+
+  --color-danger-solid: #c62828; /* 5.6:1 with white */
+  --color-danger-solid-hover: #a82020;
+
+  --syntax-keyword: #7a3fc2;
+  --syntax-string: #1a7a35;
+  --syntax-comment: #5e6a76;
+  --syntax-number: #a8530a;
+  --syntax-function: #0b5fa5;
+  --syntax-key: #0b5fa5;
+
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 1px rgba(16, 24, 40, 0.04);
+  --shadow-2: 0 8px 24px rgba(16, 24, 40, 0.12);
+  --shadow-3: 0 24px 64px rgba(16, 24, 40, 0.2);
+
+  --focus-ring-color: #0369a1;
+}
+
+/* Respect the OS setting. Transitions collapse and every looping animation
+   stops entirely: a spinner that never stops is exactly what this preference
+   is for. The spinner's meaning survives — its label still says "working". */
 @media (prefers-reduced-motion: reduce) {
   :root {
     --duration-fast: 1ms;
@@ -223,15 +339,8 @@
   }
 
   .pulse,
-  .tl-node.active .tl-icon {
-    animation: none;
+  .spin,
+  .skeleton {
+    animation: none !important;
   }
-}
-
-/* Reserved slot. A light theme is a block of overrides here and nothing else:
-   no component knows a colour value, so no component has to change. The
-   playground iframe stays light in both themes — see
-   --color-preview-surface. */
-@media (prefers-color-scheme: light) {
-  /* not implemented: this console is dark-only by decision */
 }

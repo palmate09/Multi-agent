@@ -1,93 +1,38 @@
-import type { PipelineEvent, PipelineNode } from '../types';
-import { NODE_LABELS, NODE_ORDER } from '../types';
-import { formatClock } from '../lib/format';
+import { formatClock, formatDuration } from '../lib/format';
+import { buildStages, finishedStatus, STATE_WORD } from '../lib/pipeline';
+import type { PipelineEvent } from '../types';
+import { statusTone } from '../types';
+import { StageMarker } from './PipelineRail';
 import { EmptyState } from './ui/Card';
-
-/** Human-readable one-liner for an event, shown next to the node name. */
-function describe(event: PipelineEvent): string {
-  const d = event as Record<string, unknown>;
-  const bits: string[] = [];
-
-  switch (event.phase) {
-    case 'start':
-      if (event.node === 'pipeline') {
-        bits.push(`nodes: ${(d.nodes as string[])?.join(' → ') ?? ''}`);
-      } else if (typeof d.retry === 'number') {
-        bits.push(`retry #${d.retry} (${String(d.reason ?? 'retry')})`);
-      } else {
-        bits.push('started');
-      }
-      break;
-    case 'done':
-      if (event.node === 'reasoner') {
-        // The plan node: either it wrote a plan, or it was ablated on purpose.
-        if (d.ablated === true) {
-          bits.push('ablated, no plan');
-        } else {
-          if (typeof d.risks === 'number') bits.push(`${d.risks} risks`);
-          if (typeof d.edge_cases === 'number') bits.push(`${d.edge_cases} edge cases`);
-          if (typeof d.open_questions === 'number') {
-            bits.push(`${d.open_questions} open questions`);
-          }
-          if (d.structured === false) bits.push('prose, not parsed');
-        }
-        break;
-      }
-      if (typeof d.stories === 'number') bits.push(`${d.stories} stories`);
-      if (typeof d.endpoints === 'number') bits.push(`${d.endpoints} endpoints`);
-      if (Array.isArray(d.files)) bits.push(`${d.files.length} files`);
-      if (typeof d.passed === 'number') {
-        bits.push(`${d.passed} passed, ${d.failed} failed`);
-      }
-      if (typeof d.verdict === 'string') bits.push(`verdict: ${d.verdict}`);
-      if (typeof d.blockers === 'number') bits.push(`${d.blockers} blockers`);
-      if (typeof d.status === 'string') bits.push(`status: ${d.status}`);
-      if (typeof d.reflection === 'string' && d.reflection) {
-        bits.push(String(d.reflection));
-      }
-      if (Array.isArray(d.failures) && d.failures.length) {
-        bits.push(`${(d.failures as string[]).length} failing`);
-      }
-      break;
-    case 'progress':
-      if (typeof d.detail === 'string') bits.push(String(d.detail));
-      break;
-    case 'error':
-      bits.push(String(d.error ?? 'error'));
-      break;
-    default:
-      break;
-  }
-  return bits.filter(Boolean).join(' · ');
-}
 
 interface Props {
   events: PipelineEvent[];
   running: boolean;
 }
 
+/**
+ * The detailed pipeline log: one row per stage with what it produced, how long
+ * it worked, and when it last reported. The same stage model as the header's
+ * rail, so the two cannot disagree.
+ */
 export function PipelineTimeline({ events, running }: Props) {
-  const byNode = new Map<PipelineNode, PipelineEvent[]>();
-  for (const e of events) {
-    if (e.node === 'pipeline' && e.phase === 'end') continue;
-    const list = byNode.get(e.node) ?? [];
-    list.push(e);
-    byNode.set(e.node, list);
-  }
-
-  const ordered = NODE_ORDER.filter(n => byNode.has(n));
-  // Nodes with events we don't know about (future pipeline changes).
-  const extras = [...byNode.keys()].filter(n => !NODE_ORDER.includes(n));
-
   if (events.length === 0) {
     return (
       <EmptyState>
-        No pipeline activity yet. Start a run above to see each agent step as it happens.
+        No pipeline activity yet. Each agent step appears here as it happens.
       </EmptyState>
     );
   }
 
-  const finalEvent = events.find(e => e.phase === 'end');
+  // While the run is moving, show what is still to come; once it has settled,
+  // show only what actually happened.
+  const stages = buildStages(events, running).filter(s => running || s.state !== 'pending');
+  const finished = finishedStatus(events);
+  const finishedState = finished
+    ? statusTone(finished.status) === 'bad'
+      ? 'failed'
+      : 'done'
+    : null;
 
   return (
     <div
@@ -97,40 +42,42 @@ export function PipelineTimeline({ events, running }: Props) {
       aria-relevant="additions"
       aria-label="Pipeline progress"
     >
-      {[...ordered, ...extras].map(node => {
-        const nodeEvents = byNode.get(node) ?? [];
-        const last = nodeEvents[nodeEvents.length - 1];
-        const state = last.phase === 'done' ? 'done' : 'active';
-        const isActive = state === 'active' && running;
-        return (
-          <div key={node} className={`tl-node ${state}`}>
-            {/* The glyph is decorative: the node name and the "done" wording
-                carry the meaning, so it is hidden from assistive tech. */}
-            <div className="tl-icon" aria-hidden="true">
-              {isActive ? '' : state === 'done' ? '✓' : '•'}
-            </div>
-            <div className="tl-name">
-              {NODE_LABELS[node]}
-              <div className="kv hint tl-time">{formatClock(last.ts)}</div>
-            </div>
-            <div className="tl-detail">
-              {nodeEvents.map((e, i) => (
-                <div key={e.seq ?? i}>
-                  {i > 0 && <span className="kv"> · </span>}
-                  {describe(e)}
-                </div>
-              ))}
-            </div>
+      {stages.map(s => (
+        <div key={s.node} className={`tl-node ${s.state}`}>
+          <div className="tl-icon">
+            <StageMarker state={s.state} />
           </div>
-        );
-      })}
-      {finalEvent && (
-        <div className="tl-node done">
-          <div className="tl-icon">✓</div>
-          <div className="tl-name">Finished</div>
+          <div className="tl-name">
+            {s.label}
+            <span className="visually-hidden"> ({STATE_WORD[s.state]})</span>
+            {s.ts && <div className="tl-time">{formatClock(s.ts)}</div>}
+          </div>
           <div className="tl-detail">
-            status: {String((finalEvent as Record<string, unknown>).status ?? 'unknown')}
+            {s.details.map((line, i) => (
+              <div key={i} className={line.startsWith('retry #') ? 'tl-retry' : undefined}>
+                {line}
+              </div>
+            ))}
+            {s.details.length === 0 && s.state === 'active' && (
+              <div className="tl-quiet">Working…</div>
+            )}
+            {s.state === 'pending' && <div className="tl-quiet">Waiting</div>}
           </div>
+          <div className="tl-duration">{s.seconds !== null ? formatDuration(s.seconds) : ''}</div>
+        </div>
+      ))}
+
+      {finished && finishedState && (
+        <div className={`tl-node finish ${finishedState}`}>
+          <div className="tl-icon">
+            <StageMarker state={finishedState} />
+          </div>
+          <div className="tl-name">
+            Finished
+            <div className="tl-time">{formatClock(finished.ts)}</div>
+          </div>
+          <div className="tl-detail">status: {finished.status}</div>
+          <div className="tl-duration" />
         </div>
       )}
     </div>

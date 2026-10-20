@@ -32,6 +32,12 @@ class RunCreate(BaseModel):
     run_id: str | None = Field(default=None, max_length=64)
 
 
+class FollowUpCreate(BaseModel):
+    """One change to apply to an app that already exists."""
+
+    prompt: str = Field(min_length=1, max_length=4000)
+
+
 class RunSummary(BaseModel):
     run_id: str
     requirement: str
@@ -52,6 +58,11 @@ class RunSummary(BaseModel):
     # Set when this run continues a previous one (resume): the old run id.
     # The old run is kept as history; nothing is deleted by resuming.
     resumed_from: str | None = None
+    # What the run produced: a full-stack app (backend plus an interface the
+    # app serves), a plain HTTP service, or a self-contained program.
+    kind: str | None = None
+    # The interface files, when the run produced one.
+    ui_files: list[str] = []
 
 
 class RunDetail(RunSummary):
@@ -73,6 +84,9 @@ class RunDetail(RunSummary):
     ui: dict[str, Any] | None = None
     ui_code: dict[str, str] = Field(default_factory=dict)
     ui_report: dict[str, Any] | None = None
+    # The follow-up turns applied to this run, oldest first. Each one is a
+    # child run that continued from this run's artifacts.
+    followups: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class LlmStatus(BaseModel):

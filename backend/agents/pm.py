@@ -14,15 +14,85 @@ from agents.llm import GenerationError, require
 from schemas.messages import TestReport, UserStories, UserStory
 
 SOP = (
-    "You are the Project Manager. Break the requirement into 4-7 user stories.\n"
-    "Each story needs an id (US1, US2...), a short title, and 1-3 acceptance "
-    "criteria that are concrete and testable (name the status codes and fields).\n"
+    "You are the Project Manager. Read the requirement and think it through "
+    "before writing anything.\n"
+    "1) Identify the actors and roles, the resources/entities and their "
+    "relationships, the full lifecycle of each resource (create, read, update, "
+    "delete, list/search, report), the business rules and validations, and the "
+    "failure cases. Name them concretely from the requirement, never generically.\n"
+    "2) Judge the delivery complexity:\n"
+    "   simple: one resource with basic CRUD, no cross-resource workflow.\n"
+    "   moderate: two to four related resources or a multi-step workflow.\n"
+    "   complex: five or more resources, roles/permissions, a state machine, "
+    "scheduling/booking, payments, or reporting/analytics.\n"
+    "   very_complex: multiple interacting subsystems with concurrency, "
+    "background jobs, integrations, or real-time behaviour.\n"
+    "3) Stay inside the requirement. Cover the surface it implies -- create, list, "
+    "read, update, delete, the actions it names, the validations and the failure "
+    "cases -- and nothing beyond it. Do not add accounts, roles, permissions, "
+    "payments, notifications, sharing or ratings unless the requirement names them "
+    "or clearly implies them. A deeper story list is not a licence to build a "
+    "different product.\n"
+    "4) Write one user story per distinct user-visible capability. The count "
+    "MUST follow the complexity; never default to five and never pad:\n"
+    "   simple: 3-5 stories, moderate: 6-9, complex: 10-16, "
+    "very_complex: 17-25.\n"
+    "Every story needs an id (US1, US2...), a short title, and 2-4 acceptance "
+    "criteria that are concrete and testable: name the method, path, status "
+    "codes and fields where relevant, and state the edge case it covers.\n"
     "Reply with JSON only, no prose and no markdown fence:\n"
-    '{"stories": [{"id": "US1", "title": "...", "acceptance": ["..."]}], '
+    '{"analysis": "2-4 sentences naming the actors, entities, workflows, '
+    'rules and failure cases you identified", '
+    '"complexity": "simple|moderate|complex|very_complex", '
+    '"stories": [{"id": "US1", "title": "...", "acceptance": ["..."]}], '
     '"clarifying_question": null}\n'
     "Set clarifying_question to a single question only when the requirement is "
-    "genuinely ambiguous."
+    "genuinely ambiguous. Never invent a different product."
 )
+
+# Story-count bands per complexity. The PM is asked for these ranges; a reply
+# outside the band is retried once rather than silently accepting five stories
+# for a twenty-entity system.
+_BANDS = {
+    "simple": (3, 5),
+    "moderate": (6, 9),
+    "complex": (10, 16),
+    "very_complex": (17, 25),
+}
+
+_COMPLEXITY_ALIASES = {
+    "simple": "simple",
+    "low": "simple",
+    "moderate": "moderate",
+    "medium": "moderate",
+    "intermediate": "moderate",
+    "complex": "complex",
+    "high": "complex",
+    "very_complex": "very_complex",
+    "very_high": "very_complex",
+    "enterprise": "very_complex",
+}
+
+
+def _normalise_complexity(raw: object) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    key = re.sub(r"[^a-z]+", "_", raw.strip().lower()).strip("_")
+    return _COMPLEXITY_ALIASES.get(key)
+
+
+def _story_count_problem(stories: UserStories) -> str | None:
+    """Why the story list is the wrong size for the declared complexity."""
+    if stories.complexity not in _BANDS:
+        return None
+    low, high = _BANDS[stories.complexity]
+    count = len(stories.stories)
+    if low <= count <= high:
+        return None
+    return (
+        f"complexity {stories.complexity!r} calls for {low}-{high} stories, "
+        f"but the reply had {count}"
+    )
 
 
 def _parse(text: str) -> UserStories | None:
@@ -52,29 +122,123 @@ def _parse(text: str) -> UserStories | None:
         return UserStories(
             stories=stories,
             clarifying_question=data.get("clarifying_question") or None,
+            analysis=str(data.get("analysis") or "").strip()[:1500],
+            complexity=_normalise_complexity(data.get("complexity")),
         )
     except Exception:
         return None
 
 
-def requirement_to_stories(requirement: str) -> UserStories:
-    """Generate stories. Raises ``GenerationError`` if none can be produced.
+_FOLLOWUP_SOP = (
+    "You are the Project Manager, and this is a CHANGE to an app that already "
+    "exists. The stories below are the current state of the product. Apply the "
+    "change request to them.\n"
+    "Rules:\n"
+    "- Your reply must contain EVERY story that already exists, with the same "
+    "ids, plus the new ones. Edit an existing story's acceptance criteria only "
+    "where the change alters that behaviour; leave the rest untouched.\n"
+    "- Add one story per new user-visible capability the request implies. Do not "
+    "re-list the whole product and do not renumber the existing stories.\n"
+    "- Stay inside the request: it asks for a change, not a different product. "
+    "Do not add accounts, roles, payments, notifications or features it never "
+    "mentions.\n"
+    "- The analysis explains what the change means for the app: the entities it "
+    "touches, the rules it adds, and the failure cases it introduces.\n"
+    "Reply with JSON only, no prose and no markdown fence:\n"
+    '{"analysis": "2-4 sentences about the change", '
+    '"complexity": "simple|moderate|complex|very_complex", '
+    '"stories": [{"id": "US1", "title": "...", "acceptance": ["..."]}], '
+    '"clarifying_question": null}\n'
+)
 
-    Retries once with a stricter instruction, because a small local model
-    occasionally wraps its JSON in prose or a fence.
+
+def update_stories(requirement: str, request: str, previous: UserStories) -> UserStories:
+    """The stories of an existing app plus one change.
+
+    A follow-up must *evolve* the product, not restart it: the previous
+    stories are the base, and the request is the delta. Starting from scratch
+    is how a follow-up silently drops a capability the user still wants.
+    """
+    listing = "\n".join(
+        f"- {s.id}: {s.title} ({'; '.join(s.acceptance)})" for s in previous.stories
+    )
+    prompt = (
+        f"Original requirement:\n{requirement}\n\n"
+        f"Current stories:\n{listing}\n\n"
+        f"Change request:\n{request}\n"
+    )
+    previous_ids = {s.id for s in previous.stories}
+    errors: list[str] = []
+    correction = ""
+    for _ in range(3):
+        text, _meta = require(
+            f"{prompt}{correction}Reply with the JSON object only.", _FOLLOWUP_SOP, role="pm"
+        )
+        parsed = _parse(text)
+        if parsed is None:
+            errors.append("reply was not parseable JSON with a non-empty stories list")
+            continue
+        # Every story that already exists must still be there. A follow-up that
+        # quietly drops a capability is the worst way to lose one: the person
+        # asked for a change, not for a smaller product.
+        dropped = sorted(previous_ids - {s.id for s in parsed.stories})
+        if dropped:
+            errors.append(f"the reply dropped existing stories: {dropped}")
+            correction = (
+                f"\nYour previous reply dropped these existing stories: "
+                f"{', '.join(dropped)}. Every story that already exists must be in the "
+                "reply again, unchanged unless the change alters it, plus the new ones.\n"
+            )
+            continue
+        return parsed
+    raise GenerationError(
+        "PM could not apply the change to the stories: " + "; ".join(errors)
+    )
+
+
+def requirement_to_stories(requirement: str) -> UserStories:
+    """Generate depth-first, complexity-sized stories.
+
+    A small model occasionally wraps its JSON in prose or a fence, and it will
+    happily return five stories for a system with twenty entities if nobody
+    checks. The first problem is retried with the exact correction; a story
+    count outside the declared complexity band is retried too. If the model
+    still disagrees after three attempts, its last usable answer is returned
+    rather than blocking an otherwise generatable run.
     """
     errors: list[str] = []
-    for attempt in range(2):
-        extra = "\nReply with the JSON object only." if attempt else ""
+    last_good: UserStories | None = None
+    correction = ""
+    for _attempt in range(3):
         try:
-            text, _meta = require(f"Requirement:\n{requirement}\n{extra}", SOP, role="pm")
+            text, _meta = require(
+                f"Requirement:\n{requirement}\n{correction}Reply with the JSON object only.",
+                SOP,
+                role="pm",
+            )
         except GenerationError as exc:
             errors.append(str(exc))
             continue
         parsed = _parse(text)
-        if parsed is not None:
+        if parsed is None:
+            errors.append("reply was not parseable JSON with a non-empty stories list")
+            correction = (
+                "\nYour previous reply was not valid JSON. Reply with the JSON object only, "
+                "including 'analysis', 'complexity' and a non-empty 'stories' list.\n"
+            )
+            continue
+        last_good = parsed
+        why = _story_count_problem(parsed)
+        if why is None:
             return parsed
-        errors.append("reply was not parseable JSON with a non-empty stories list")
+        errors.append(why)
+        correction = (
+            f"\nCorrection: {why}. Keep the same requirement and complexity, but add "
+            "the missing distinct capabilities (or remove padding) so the count fits the "
+            "band. Rewrite the complete JSON object.\n"
+        )
+    if last_good is not None:
+        return last_good
     raise GenerationError("PM could not produce user stories: " + "; ".join(errors))
 
 

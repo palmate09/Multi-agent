@@ -163,10 +163,19 @@ class Run:
                         "entrypoint": s.get("entrypoint"),
                         "files": s.get("files", []),
                         "error": s.get("error") or self.error,
+                        # The kind tells the person what they got: a full-stack
+                        # app they can open, a service, or a program.
+                        "kind": s.get("kind"),
+                        "ui_files": s.get("ui_files", []),
                     }
                 )
             except json.JSONDecodeError:
                 pass
+        st = self.state
+        if st is not None and st.spec is not None:
+            # Known as soon as the contract exists, so the list can say what
+            # the run is building before it finishes.
+            data["kind"] = st.spec.kind
         return data
 
     def detail(self) -> dict[str, Any]:
@@ -187,6 +196,7 @@ class Run:
             data["ui"] = st.ui_spec.model_dump() if st.ui_spec else None
             data["ui_code"] = dict(st.ui_code.files) if st.ui_code else {}
             data["ui_report"] = st.ui_report.model_dump() if st.ui_report else None
+            data["kind"] = st.spec.kind if st.spec else data.get("kind")
         else:
             data.update(self._artifacts_from_disk())
         return data
@@ -224,6 +234,15 @@ class Run:
                     for p in sorted(root.rglob("*"))
                     if p.is_file()
                 }
+        # A full-stack application keeps its interface inside the app package,
+        # because the app serves it. Surface it as the interface either way.
+        static_root = self.run_dir / "code" / "static"
+        if static_root.is_dir() and not out["ui_code"]:
+            out["ui_code"] = {
+                str(p.relative_to(static_root)): p.read_text()
+                for p in sorted(static_root.rglob("*"))
+                if p.is_file()
+            }
         review = self.run_dir / "review.json"
         if review.exists():
             with contextlib.suppress(json.JSONDecodeError):
@@ -297,6 +316,12 @@ class RunStore:
         # (resume). Popped exactly once by _execute; never persisted because
         # the artifacts they came from are the durable record.
         self._resume_states: dict[str, Any] = {}
+        # Follow-up turns waiting for their turn. Keyed by the run they
+        # continue; the values are the child run ids, oldest first. Only one
+        # child of a parent runs at a time, so two changes never edit the same
+        # files at once.
+        self._followup_pending: dict[str, list[str]] = {}
+        self._followup_active: set[str] = set()
 
     # -- lifecycle ------------------------------------------------------
     def new_id(self, requested: str | None) -> str:
@@ -504,6 +529,94 @@ class RunStore:
         self.submit(new_run)
         return new_run
 
+    # -- follow-ups ------------------------------------------------------
+    def add_followup(self, parent_id: str, prompt: str) -> Run:
+        """Queue one change to an existing app.
+
+        The follow-up is a child run: it starts from the parent's artifacts and
+        applies the instruction, so the result is the same product with one
+        thing different. Follow-ups of the same parent run **one at a time**,
+        in the order they were given -- two changes editing the same files at
+        once would fight, and the second would win.
+        """
+        prompt = (prompt or "").strip()
+        if not prompt:
+            raise ValueError("a follow-up needs an instruction")
+        with self._lock:
+            parent = self._runs.get(parent_id)
+            if parent is None:
+                raise KeyError(parent_id)
+            if parent.status in ACTIVE_STATUSES:
+                raise RunningError(parent_id, parent.status)
+            options = dict(parent.options)
+            # The chain keeps one base requirement: the second follow-up
+            # continues the first, not the original prompt.
+            base = options.get("base_requirement") or parent.requirement
+            options["base_requirement"] = base
+            options["followup_of"] = parent_id
+            options["followup_prompt"] = prompt
+        state = reconstruct_state(parent.run_dir)
+        state.requirement = base
+        child = self.create(prompt, run_id=None, **options)
+        with self._lock:
+            self._followup_pending.setdefault(parent_id, []).append(child.run_id)
+            self._resume_states[child.run_id] = state
+            busy = parent_id in self._followup_active
+        if not busy:
+            self._start_followup(parent_id, child.run_id)
+        return child
+
+    def followups_of(self, parent_id: str) -> list[dict[str, Any]]:
+        """The follow-up turns of a run, oldest first."""
+        with self._lock:
+            children = [
+                r
+                for r in self._runs.values()
+                if r.options.get("followup_of") == parent_id
+            ]
+        children.sort(key=lambda r: r.created_at)
+        out = []
+        for r in children:
+            summary = r.summary
+            out.append(
+                {
+                    "run_id": r.run_id,
+                    "prompt": r.options.get("followup_prompt", ""),
+                    "status": r.status,
+                    "created_at": r.created_at,
+                    "error": r.error,
+                    "tests_passed": summary.get("tests_passed", 0),
+                    "tests_failed": summary.get("tests_failed", 0),
+                }
+            )
+        return out
+
+    def _start_followup(self, parent_id: str, child_id: str) -> None:
+        """Put a queued follow-up on the worker, one at a time per parent."""
+        with self._lock:
+            self._followup_active.add(parent_id)
+        child = self._runs.get(child_id)
+        if child is None:
+            with self._lock:
+                self._followup_active.discard(parent_id)
+            return
+        self.submit(child)
+
+    def _advance_followup_queue(self, finished: Run) -> None:
+        """Start the next queued change for this run's parent, if any."""
+        parent_id = finished.options.get("followup_of")
+        if not parent_id:
+            return
+        with self._lock:
+            queue = self._followup_pending.get(parent_id) or []
+            nxt = queue.pop(0) if queue else None
+            if not queue:
+                self._followup_pending.pop(parent_id, None)
+            if not nxt:
+                self._followup_active.discard(parent_id)
+        if nxt:
+            self._start_followup(parent_id, nxt)
+
     def _execute(self, run: Run) -> None:
         run.status = "running"
         run.updated_at = _now()
@@ -525,11 +638,20 @@ class RunStore:
             use_docker = self.settings.sandbox_use_docker or Runner.uses_docker()
         else:
             use_docker = bool(explicit)
+        # A follow-up is a change to an existing app: the pipeline sees the
+        # original requirement plus the instruction, while the run itself is
+        # labelled with the instruction the user typed.
+        followup_prompt = str(run.options.get("followup_prompt") or "")
+        followup_of = str(run.options.get("followup_of") or "")
+        requirement = run.requirement
+        if followup_prompt:
+            base = str(run.options.get("base_requirement") or run.requirement)
+            requirement = f"{base}\n\nFollow-up request:\n{followup_prompt}"
         try:
             with self._lock:
                 resume_state = self._resume_states.pop(run.run_id, None)
             run.state = run_team(
-                run.requirement,
+                requirement,
                 out_dir=str(run.run_dir),
                 use_docker=use_docker,
                 skip_tester=bool(run.options.get("skip_tester")),
@@ -540,6 +662,8 @@ class RunStore:
                 run_id=run.run_id,
                 cancel=run.cancel_event,
                 resume=resume_state,
+                followup=followup_prompt,
+                followup_of=followup_of,
             )
             run.status = run.state.status
         except Exception as exc:
@@ -565,6 +689,9 @@ class RunStore:
             if run.run_dir.is_dir():
                 get_index().index_files(run.run_id, run.run_dir)
             run.mark_finished()
+            # The next queued change for this run's parent starts now, so the
+            # follow-ups the user gave run one after another.
+            self._advance_followup_queue(run)
 
     def rehydrate(self) -> int:
         """Rebuild run metadata for directories already on disk (e.g. restart)."""

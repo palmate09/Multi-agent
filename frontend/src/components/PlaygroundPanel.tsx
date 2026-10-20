@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '../api';
 import type { PreviewState, PreviewStatus, RunSummary } from '../types';
@@ -6,7 +6,9 @@ import { Alert } from './ui/Alert';
 import { Badge } from './ui/Badge';
 import { Button } from './ui/Button';
 import { Card } from './ui/Card';
+import { CodeBlock } from './ui/CodeBlock';
 import { EmptyState } from './ui/Card';
+import { Icon } from './ui/Icon';
 import { SkeletonGroup } from './ui/Skeleton';
 
 interface Props {
@@ -29,7 +31,6 @@ const EXPLAIN: Record<PreviewState, string> = {
   running: 'The app is serving behind the gateway, in an isolated sandbox container.',
   crashed: 'The app did not come up. The log below is what it printed.',
 };
-
 /**
  * Live view of a generated app: state, controls, log tail, iframe.
  *
@@ -45,7 +46,6 @@ export function PlaygroundPanel({ run, reloadKey, onReload }: Props) {
   const [status, setStatus] = useState<PreviewStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -55,17 +55,23 @@ export function PlaygroundPanel({ run, reloadKey, onReload }: Props) {
     }
   }, [run.run_id]);
 
+  // Read the status once when the panel opens (or the run changes).
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
-    // A boot is the only state here that changes on its own. A running
-    // app is stable, and the idle TTL is enforced server-side.
+  }, [refresh]);
+
+  // A boot is the only state here that changes on its own: a running app is
+  // stable, and the idle TTL is enforced server-side. While it is `starting`,
+  // each answer schedules the next poll. This depends on the status OBJECT, not
+  // on `status.state`: while the app is still starting the state does not
+  // change, so keying on it polled exactly once and then left the badge on
+  // "starting" forever whenever a boot took longer than one interval.
+  useEffect(() => {
     if (status?.state !== 'starting') return;
-    pollRef.current = setTimeout(() => void refresh(), 1500);
-    return () => {
-      if (pollRef.current) clearTimeout(pollRef.current);
-    };
-  }, [refresh, status?.state]);
+    const timer = setTimeout(() => void refresh(), 1500);
+    return () => clearTimeout(timer);
+  }, [status, refresh]);
 
   const act = async (fn: () => Promise<PreviewStatus | void>) => {
     setBusy(true);
@@ -95,15 +101,21 @@ export function PlaygroundPanel({ run, reloadKey, onReload }: Props) {
 
   return (
     <Card label="Playground">
-      <div className="row row-between">
-        <div>
-          <h2>Playground</h2>
-          <Badge tone={TONE[state]} pulse={state === 'starting'}>
-            {state}
-          </Badge>
-          <div className="hint" style={{ marginTop: 6 }}>
-            {EXPLAIN[state]}
+      <div className="playground-head">
+        <div className="playground-title">
+          <div className="playground-name">
+            <h2>Playground</h2>
+            <Badge tone={TONE[state]} pulse={state === 'starting'}>
+              {state}
+            </Badge>
           </div>
+          <div className="hint">{EXPLAIN[state]}</div>
+          {run.kind === 'fullstack' && (
+            <div className="hint">
+              This is the generated application itself — the same process serves the page and
+              the API.
+            </div>
+          )}
         </div>
         <div className="row">
           <Button
@@ -137,26 +149,43 @@ export function PlaygroundPanel({ run, reloadKey, onReload }: Props) {
       {status === null && !error && <SkeletonGroup label="Checking playground status" rows={2} />}
 
       {running && (
-        <>
+        <div className="browser">
+          <div className="browser-bar">
+            <span className="browser-url" title={url}>
+              {url}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="icon-btn"
+              onClick={onReload}
+              aria-label="Refresh preview"
+              title="Re-fetch the page inside the frame"
+            >
+              <Icon name="refresh" size={15} />
+            </Button>
+            <a
+              className="btn btn-sm ghost icon-btn preview-link"
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="Open preview in a new tab"
+              title="Open in a new tab"
+            >
+              <Icon name="external" size={15} />
+            </a>
+          </div>
           <iframe
             key={reloadKey}
             title={`Preview of ${run.run_id}`}
             src={url}
             className="preview-frame"
           />
-          <div className="row" style={{ marginTop: 10 }}>
-            <a className="ghost preview-link" href={url} target="_blank" rel="noopener noreferrer">
-              Open in a new tab
-            </a>
-            <Button variant="ghost" onClick={onReload} title="Re-fetch the page inside the iframe">
-              Refresh
-            </Button>
-            <span className="hint">
-              {status?.mode === 'container' ? 'isolated container' : 'local subprocess'} · idle{' '}
-              {idleMinutes}m
-            </span>
+          <div className="browser-foot hint">
+            {status?.mode === 'container' ? 'Isolated container' : 'Local subprocess'} · idle{' '}
+            {idleMinutes}m
           </div>
-        </>
+        </div>
       )}
 
       {!running && status !== null && (
@@ -174,10 +203,9 @@ export function PlaygroundPanel({ run, reloadKey, onReload }: Props) {
       )}
 
       {status?.log_tail && (
-        <>
-          <h3 className="log-heading">Server log</h3>
-          <pre className="code">{status.log_tail}</pre>
-        </>
+        <div className="log-block">
+          <CodeBlock code={status.log_tail} title="Server log" lineNumbers={false} />
+        </div>
       )}
     </Card>
   );

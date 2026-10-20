@@ -1,4 +1,8 @@
-"""CLI: --stub, --run, --eval, --live, ablations (--no-tester/--no-reviewer/--no-reasoner), --ui."""
+"""CLI: --stub, --run, --eval, --live, ablations (--no-tester/--no-reviewer/--no-reasoner), --ui.
+
+A run produces a full-stack application unless the requirement asks for a
+service or a program on its own; ``--ui`` adds the interface to a request
+that names only a backend."""
 
 from __future__ import annotations
 
@@ -24,7 +28,11 @@ def main():
     ap.add_argument("--no-tester", action="store_true")
     ap.add_argument("--no-reviewer", action="store_true")
     ap.add_argument("--no-reasoner", action="store_true")
-    ap.add_argument("--ui", action="store_true", help="also generate a static web UI")
+    ap.add_argument(
+        "--ui",
+        action="store_true",
+        help="also build the web interface for a request that names only a backend",
+    )
     ap.add_argument("--docker", action="store_true")
     args = ap.parse_args()
 

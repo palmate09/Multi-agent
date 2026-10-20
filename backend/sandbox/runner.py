@@ -538,6 +538,7 @@ def boot_check(
     code: CodeBundle,
     timeout: int = 60,
     public_api: list[str] | None = None,
+    web_root: bool = False,
 ) -> tuple[bool, str]:
     """Import the generated code and confirm its entry point is usable.
 
@@ -548,6 +549,11 @@ def boot_check(
 
     Passing ``public_api`` switches the check from "exposes a FastAPI app" to
     "exposes these declared names", which is what a non-service project needs.
+
+    ``web_root`` asks the harder question a full-stack application has to
+    answer: does it actually serve a page at ``/``? An app that imports
+    cleanly but never mounts its interface is a backend wearing a full-stack
+    label, and the person opening the preview would see a 404.
     """
     if public_api:
         modules = _importable_modules(code)
@@ -567,6 +573,21 @@ def boot_check(
             f"assert a is not None, 'module has no {attr}'; "
             f"print('boot-ok', type(a).__name__)"
         )
+        if web_root:
+            probe = (
+                f"import {module} as _m; "
+                f"a = getattr(_m, {attr!r}, None); "
+                "assert a is not None, 'module has no " + attr + "'; "
+                "from fastapi.testclient import TestClient; "
+                "_c = TestClient(a); "
+                "_r = _c.get('/'); "
+                "assert _r.status_code == 200, "
+                "'the application did not serve a page at / (status ' "
+                "+ str(_r.status_code) + ')'; "
+                "assert 'text/html' in _r.headers.get('content-type', ''), "
+                "'GET / did not return an HTML page'; "
+                "print('boot-ok', type(a).__name__)"
+            )
 
     with _bundle_dir("agent-boot-") as tmp:
         try:

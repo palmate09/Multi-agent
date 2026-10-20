@@ -1,5 +1,7 @@
 import type { EvalResults } from '../types';
+import { statusTone } from '../types';
 import { Alert } from './ui/Alert';
+import { Badge } from './ui/Badge';
 import { EmptyState } from './ui/Card';
 import { SkeletonGroup } from './ui/Skeleton';
 import { Stat, StatGrid } from './ui/Stat';
@@ -84,7 +86,9 @@ export function EvalPanel({ data }: { data: EvalResults | null }) {
                 <td>
                   <code>{r.run}</code>
                 </td>
-                <td>{r.status}</td>
+                <td>
+                  <Badge tone={statusTone(r.status)}>{r.status}</Badge>
+                </td>
                 <td className="num">{r.test_pass_rate?.toFixed(2) ?? '—'}</td>
                 <td className="num">{r.spec_coverage?.toFixed(2) ?? '—'}</td>
                 <td className="num">

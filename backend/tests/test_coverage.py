@@ -175,7 +175,41 @@ def test_task_code_is_blocked_for_an_inventory_requirement():
 def test_required_scales_with_requirement_size():
     from agents.coverage import _required
 
-    assert _required(1) == 2
+    # One anchor is enough for a tiny ask; real requirements keep ~35%.
+    assert _required(1) == 1
+    assert _required(4) == 1
     assert _required(5) == 2
     assert _required(10) == 4
     assert _required(40) == 14
+
+
+def test_short_game_requirement_passes_with_one_domain_word():
+    """Reproduction: "make the tic tac toe game." failed before any test ran.
+
+    The old floor of two matched groups demanded half the vocabulary of a
+    four-group ask. A correct implementation names the subject once ("Game",
+    "board", "move") and never spells "tic"/"tac"/"toe" in Python identifiers.
+    """
+    code = {
+        "main.py": (
+            "class Game:\n"
+            "    def __init__(self):\n"
+            "        self.board = [[None] * 3 for _ in range(3)]\n"
+            "        self.current_player = 'X'\n"
+        )
+    }
+    verdict = check("make the tic tac toe game.", code, {("/board", "GET")})
+    assert verdict.conclusive
+    assert verdict.ok, verdict.missing
+    assert "game" in verdict.covered
+
+
+def test_ui_prose_is_not_domain_terms():
+    """Full-stack asks mix UI instructions with domain nouns."""
+    groups = term_groups(
+        "Show the board, let two players take turns and add a reset button."
+    )
+    terms = [g[0] for g in groups]
+    for word in ("show", "let", "two", "take", "turns", "button"):
+        assert word not in terms, word
+    assert "board" in terms

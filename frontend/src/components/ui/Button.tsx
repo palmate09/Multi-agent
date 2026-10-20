@@ -1,6 +1,7 @@
 import type { ButtonHTMLAttributes } from 'react';
 
 import { cn } from '../../lib/cn';
+import { Icon } from './Icon';
 
 export type ButtonVariant = 'default' | 'primary' | 'ghost' | 'danger';
 export type ButtonSize = 'sm' | 'md';
@@ -42,6 +43,7 @@ export function Button({
       aria-busy={loading || undefined}
       {...rest}
     >
+      {loading && <Icon name="loader" />}
       {loading && loadingLabel ? loadingLabel : children}
     </button>
   );

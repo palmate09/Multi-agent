@@ -1,7 +1,14 @@
 # Multi-Agent Software Team
 
-5 LLM agents turn plain English into a tested, reviewed FastAPI REST API — and,
-if you ask, a static web UI for it that you can click on and use.
+5 LLM agents turn plain English into a tested, reviewed **full-stack
+application**: a real backend with a database, and a real web interface that
+the application itself serves, so the result is something you open in a
+browser and use.
+
+Ask for a service ("a REST API for …", "backend only") and you get a service.
+Ask for a library, a CLI or a game and you get a program. Ask for anything
+else — "a habit tracker where I can tick things off" — and you get a full-stack
+app: the interface is part of the product, not a page bolted on beside it.
 
 Bring your own model: a Gemini API key (a run takes 1-2 minutes) or local
 Ollama (free and private, but 3-6 minutes on CPU). There is **no template
@@ -16,13 +23,19 @@ both, and a CI/CD pipeline that deploys to a GCP VM.
 ## Architecture
 
 ```
-Requirement -> PM (stories) -> Reasoner (plan: approach/risks/edge cases)
+Requirement -> PM (stories, complexity-sized) -> Reasoner (plan: approach/risks/edge cases)
   -> Designer (OpenAPI + file plan) -> Developer
   -> domain coverage gate -> boot check -> Tester || (developer self-checks)
   -> Sandbox Runner (container, internal net) -> triage+reflection -> Developer
-  -> UI designer -> UI developer -> UI gate (advisory)      [opt-in]
+  -> UI designer -> UI developer -> UI gate (advisory)
   -> Reviewer (ruff+bandit) -> done
 ```
+
+For a full-stack run the UI nodes are not optional: the interface is generated
+into the app package (`code/static/`) and the generated application serves it
+at `/`, so the sandbox runs one process that *is* the product. The boot check
+asks that process for a page at `/` before the run is allowed to call itself
+green.
 
 ```
 browser ──> Caddy ──> nginx (SPA + /api + /preview proxy) ──> FastAPI ──> agents
@@ -185,26 +198,85 @@ The entrypoint is **discovered from the code** by AST inspection
 
 ## Full-stack runs and the playground
 
-Tick **Generate a web UI** (or pass `--ui`) to add three nodes after the
-backend tests are green:
+A run produces one of three things, decided by what the requirement asks for
+(`agents/kind.py`):
+
+| Kind | When | What you get |
+| --- | --- | --- |
+| `fullstack` | the default: anything that is not explicitly a service or a program | a backend **and** an interface the app serves at `/` |
+| `api` | "a REST API for …", "backend only", "no frontend" | a service, and nothing else |
+| `program` | a library, a CLI, a game, an algorithm | a Python program with a declared public interface |
+
+The default used to be `api`, which meant a person asking for "a habit tracker
+where I can tick things off" received a bag of JSON endpoints and no way to use
+them. Now a bare ask is a full-stack app, and only an explicit service request
+produces a service.
+
+For a full-stack run the three UI nodes after the backend tests are green are
+not optional:
 
 ```
 ui_designer -> ui_developer -> ui_gate
 ```
 
-They emit a **static, no-build** UI — `index.html`, `app.js`, `styles.css` —
-bound to the endpoints the generated API actually declares. There is no React,
-no npm and no bundler in the loop.
+They emit a **static, no-build** interface — `index.html`, `app.js`,
+`styles.css` — bound to the endpoints the generated API actually declares.
+There is no React, no npm and no bundler in the loop. The files are written
+into the app package (`code/static/`), and the generated application mounts
+that directory at `/` and serves it: the sandbox runs **one process, and that
+process is the product**.
 
-Two things are checked rather than merely requested:
+### What the generated interface looks like
 
-* **Relative URLs.** The UI is served at `/preview/<run_id>/`, so
+The generation is held to a **clean and modern** bar, not just "it renders":
+
+* **It renders on load.** One canonical mount point (`<main id="root">`) that
+  the script finds and renders into, started from a `DOMContentLoaded`
+  listener or a top-level call. A file of helper functions that nothing ever
+  calls renders a blank white frame — the most common way a generated
+  interface looks broken, and the reason the gate now checks for it.
+* **Clean.** One mount id, no dead code (every function is called), short
+  functions with clear names, section comments in the CSS, and no file over
+  roughly 400 lines.
+* **Modern JavaScript.** `const`/`let`, arrow functions, `async`/`await`,
+  template literals, `classList`/`dataset` instead of hand-built class
+  strings, `URLSearchParams` for query state, `Intl.DateTimeFormat` for dates,
+  and `AbortController` where a fetch can be superseded. No `alert()`,
+  `prompt()`, `confirm()` or `document.write`: a problem is reported in the
+  interface, not in a browser dialog.
+* **Modern CSS.** A `:root` design system, `clamp()` for fluid type,
+  `:focus-visible`, `prefers-reduced-motion`, and `prefers-color-scheme` so the
+  page follows the reader's theme.
+* **Semantic and accessible.** `<main>`, `<header>`, `<section>`, `<form>`,
+  real `<button>`/`<label>` elements, `<template>` for repeated rows, labelled
+  controls, `aria-live` status regions and keyboard-reachable interactions.
+
+Three things are checked rather than merely requested:
+
+* **The app serves a page at `/`.** The boot check asks the running application
+  for a page, and the preview refuses to report `running` until it gets a 200
+  with HTML *and a mount element to render into*. An app that imports cleanly
+  but never mounts its interface is a backend wearing a full-stack label, and
+  the person opening the preview would see a 404.
+* **Relative URLs.** The app is served at `/preview/<run_id>/`, so
   `fetch('/books')` would hit the *platform's* API instead of the sandboxed one.
 * **No external origins.** The preview sandbox has no network, so a CDN link
   renders a half-styled page.
 
-The gate's verdict is **advisory**: a broken UI is reported on the UI tab and
-folded into the review as `minor` findings, but it never changes the run's
+The interface itself is graded by a **16-check static gate**: the planned
+files exist, the calls are relative, there is no external origin, no
+interpolated `innerHTML`, the bindings match the contract, the app **renders
+on load** (the script must render into the mount element the HTML declares —
+a file of helper functions that nothing calls renders a blank white frame),
+the code is modern (`const`/`let`, no `alert()`/`confirm()`/`document.write`),
+the page has semantic landmarks, and the CSS carries design tokens, a
+responsive breakpoint and visible focus states.
+
+A failing gate triggers **one targeted repair pass** that is handed the exact
+findings, and the rewrite is kept only when it actually removes failures.
+
+The gate's verdict is **advisory**: a broken interface is reported on the UI tab
+and folded into the review as `minor` findings, but it never changes the run's
 terminal status. A green, tested, reviewed backend run stays green.
 
 Then the **Playground** tab boots the generated app in a **hardened sandbox
@@ -230,15 +302,49 @@ ANY  /preview/{rid}/{path:path}         -> reverse proxy to container IP
 * **Database-backed sessions**: PostgreSQL stores revocable sessions, durable
   login attempt counts, run events, and file indexes. Logout actually revokes;
   a fresh limiter blocks after 3 failures.
-* Health probe: exponential backoff from 250 ms polls the spec's declared paths
-  for HTTP 200 within `PREVIEW_BOOT_TIMEOUT_SECONDS` → `running`, else
-  `crashed` with log tail. `ever_booted` is sticky across stops/restarts.
+* Health probe: exponential backoff from 50 ms polls the spec's declared paths
+  for an HTTP answer below 500 within `PREVIEW_BOOT_TIMEOUT_SECONDS` →
+  `running`, else `crashed` with log tail. A full-stack run must additionally
+  answer `/` with an HTML page. `ever_booted` is sticky across stops/restarts.
 * TTL reap (default 1800s idle) and concurrency cap (`SANDBOX_MAX_CONCURRENT=4`)
   bound resource use. Crash-restart recovers on the next proxy request.
 
 > The playground **is isolation** — a hardened container on an internal network
 > with no egress, no host filesystem access, and a dedicated sidecar mediating
 > Docker. This replaces the previous subprocess model.
+
+## Follow-ups: change the app after it is built
+
+A generated app is a starting point, not a finished product. The **Follow-up**
+tab takes an instruction in plain English — *"let me mark a habit as skipped
+for a day, and show skipped days next to the streak count"* — and applies it to
+the app that already exists.
+
+A follow-up is **not** a new run of the same requirement. It starts from the
+run's artifacts and changes one thing:
+
+| Node | What a follow-up does |
+| --- | --- |
+| PM | keeps the existing stories, edits the ones the change alters, adds stories for the new capability |
+| Designer | returns the **complete** updated contract — the old paths survive, the new one is added |
+| Developer | edits the existing files; the code it already had is in the prompt |
+| Tester | regenerates the suite from the updated contract, so the new endpoint is covered |
+| Interface | regenerated from the new contract, so the change is visible in the app |
+| Reviewer | re-reviews the result |
+
+Nothing is overwritten: each change is a **child run** that continues from its
+parent, so the history of an app is a chain of runs rather than a pile of
+replaced files. The parent lists its changes, and each one opens the run it
+produced.
+
+Follow-ups of the same run are executed **one at a time**, in the order they
+were given. Two changes editing the same files at once would fight, and the
+second would silently win.
+
+```
+POST /api/runs/{rid}/followups   {"prompt": "..."}  -> 202, the child run
+GET  /api/runs/{rid}                                   -> "followups": [...]
+```
 
 ## Choosing a backend
 

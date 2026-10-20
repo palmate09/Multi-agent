@@ -58,7 +58,7 @@ skip_if_no_image = pytest.mark.skipif(
 # ------------------------------------------------------------------------ generated app + spec ---
 APP_PY = """from fastapi import FastAPI
 
-app = FastAPI(items=["one"])
+app = FastAPI()
 
 
 @app.get("/health")

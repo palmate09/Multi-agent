@@ -8,7 +8,11 @@ You are taking over the repo at `/home/shubham/projects/Multi-agent` (git repo, 
 
 ## 1. What this app does
 
-5 LLM agents turn plain English into a tested, reviewed FastAPI REST API. No template fallback — failed generation ends `blocked`, never a silent substitution.
+5 LLM agents turn plain English into a tested, reviewed **full-stack
+application**: a FastAPI backend with a database plus a web interface the
+application itself serves at `/` (a bare ask gets one; an explicit "REST API"
+or "backend only" gets a service instead). No template fallback — failed
+generation ends `blocked`, never a silent substitution.
 
 Pipeline (`backend/graph/workflow.py:run_team`):
 
@@ -24,6 +28,8 @@ Requirement
  -> Sandbox Runner (pytest, local subprocess by default, --docker for Docker no-net)
  -> triage (PM: code_bug vs test_bug) + reflection (Developer.reflect -> memory[])
  -> Developer patch loop (max_dev=4, max_test=2)
+ -> UI designer -> UI developer -> UI gate (advisory)  [full-stack runs: the
+    interface is written into code/static/ and the app serves it at "/"]
  -> Reviewer (code+spec+tests + ruff + bandit, blocker=>retry max_review=2)
  -> final (summary.json)
 ```

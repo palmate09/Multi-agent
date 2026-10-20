@@ -21,6 +21,11 @@ class UserStory(BaseModel):
 class UserStories(BaseModel):
     stories: list[UserStory]
     clarifying_question: str | None = None
+    # The PM's depth pass: actors, entities, workflows, rules and failure cases,
+    # plus the complexity band that decided the story count. Optional so
+    # stories.json artifacts written before this field still load on resume.
+    analysis: str = ""
+    complexity: str | None = None
 
 
 class Plan(BaseModel):
@@ -58,11 +63,17 @@ class ApiSpec(BaseModel):
     domain_terms: list[str] = []
 
     # ---- non-service projects ----
-    # "api" (the default) means an HTTP service: the contract above is OpenAPI
-    # and the app object is discovered from the code. "program" means a
-    # self-contained piece of software such as a game or a library, where an
+    # "fullstack" is the default deliverable: a web application a person uses.
+    # Its contract is OpenAPI for the backend, and the application serves its
+    # own frontend at "/", so the sandbox runs one process that is the product.
+    # "api" means a backend service with no user interface: the contract above
+    # is OpenAPI and the app object is discovered from the code. "program" means
+    # a self-contained piece of software such as a game or a library, where an
     # OpenAPI document would be an invention rather than a translation.
-    kind: Literal["api", "program"] = "api"
+    # The default is "api" because a contract always states its kind
+    # explicitly; the *detection* default (a bare "build me a counter") is
+    # full-stack, and that decision is made in agents.kind.
+    kind: Literal["api", "program", "fullstack"] = "api"
     # For kind="program": a prose contract naming the modules, the entrypoint,
     # the public interface and the behaviours that must hold.
     contract_text: str = ""
@@ -70,11 +81,10 @@ class ApiSpec(BaseModel):
     # the boot check and the Reviewer.
     public_api: list[str] = []
 
-    # Whether this run should also generate a web UI for the API above. A
-    # boolean rather than a third ``kind``: only api-kind projects get a UI, and
-    # ``kind`` is threaded through eight modules, so widening it would buy
-    # nothing and cost a migration. Defaults to off, so a run that does not ask
-    # for a UI behaves exactly as it did before.
+    # Whether this run should also generate a web UI for the API above. For a
+    # full-stack run this is always true: the frontend is part of the
+    # application, not a page bolted on beside it. For an api-kind run it
+    # stays off, so a backend-only request behaves exactly as it did before.
     has_ui: bool = False
 
 
@@ -215,3 +225,10 @@ class GraphState(BaseModel):
     # Populated when the run stops early so the failure is explainable rather
     # than presenting as a successful run with default metrics.
     error: str = ""
+    # ---- follow-ups ----
+    # A follow-up applies one instruction to an existing app: the run carries
+    # the previous artifacts as its base, and this is the change it makes.
+    followup_prompt: str = ""
+    # The run this one continues. A follow-up is a child run, so the history
+    # of an app is a chain of runs rather than a pile of overwritten files.
+    followup_of: str = ""

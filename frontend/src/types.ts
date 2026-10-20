@@ -43,6 +43,11 @@ export interface RunSummary {
   error?: string | null;
   /** Set when this run continues a previous one (resume); the old run id. */
   resumed_from?: string | null;
+  /**
+   * What the run produced: a full-stack app (backend plus an interface the
+   * app serves), a plain HTTP service, or a self-contained program.
+   */
+  kind?: 'fullstack' | 'api' | 'program' | null;
 }
 
 /** Verdict from the domain coverage gate. */
@@ -142,6 +147,19 @@ export interface RunDetail extends RunSummary {
   ui_code?: Record<string, string>;
   /** Static gate verdict over those files. */
   ui_report?: UiReport | null;
+  /** The changes applied to this run, oldest first. */
+  followups?: FollowUp[];
+}
+
+/** One change applied to an app that already existed. */
+export interface FollowUp {
+  run_id: string;
+  prompt: string;
+  status: string;
+  created_at: string;
+  error: string | null;
+  tests_passed: number;
+  tests_failed: number;
 }
 
 export interface SessionInfo {

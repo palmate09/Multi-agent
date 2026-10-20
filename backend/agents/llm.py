@@ -326,6 +326,28 @@ def _retry_max() -> int:
         return 3
 
 
+def _quota_waits() -> tuple[float, ...]:
+    """How long to wait out a closed rate-limit window, in seconds.
+
+    A 429 on a free hosted tier is usually a *token-per-minute* quota, and the
+    window is a minute wide. The ordinary backoff (4s, 8s, 16s) expires well
+    inside that window, so the run died of a quota it would have survived a
+    minute later. These waits span the window instead of pretending it does
+    not exist.
+    """
+    raw = os.getenv("LLM_QUOTA_WAITS", "") or "20,40,60"
+    waits: list[float] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            waits.append(max(0.0, float(part)))
+        except ValueError:
+            continue
+    return tuple(waits) or (20.0, 40.0, 60.0)
+
+
 def _interruptible_sleep(delay: float) -> None:
     """Backoff sleep that a run stop cuts short.
 
@@ -344,14 +366,37 @@ def _interruptible_sleep(delay: float) -> None:
 def _post_json_retry(
     url: str, payload: dict, headers: dict | None = None, timeout: int = 60
 ) -> dict:
-    """POST JSON, retrying transient failures with exponential backoff."""
+    """POST JSON, retrying transient failures with exponential backoff.
+
+    A 429 gets its own, slower schedule: hosted free tiers meter *tokens per
+    minute*, so the quota reopens about a minute later. Giving up after the
+    ordinary 4s/8s backoff killed runs that were one minute from working.
+    """
     last: Exception | None = None
     attempts = _retry_max()
-    for attempt in range(attempts):
+    quota_waits = _quota_waits()
+    quota_used = 0
+    attempt = 0
+    while True:
         try:
             return _post_json(url, payload, headers, timeout)
         except urllib.error.HTTPError as e:
-            if e.code not in _RETRY_STATUS or attempt == attempts - 1:
+            if e.code == 429 and quota_used < len(quota_waits):
+                delay = quota_waits[quota_used]
+                quota_used += 1
+                last = e
+                try:
+                    body = e.read().decode()[:120]
+                except Exception:
+                    body = ""
+                _note_failure(
+                    f"quota:{url.split('/')[2]}",
+                    f"HTTP 429, waiting {delay:.0f}s for the rate-limit window {body}",
+                )
+                _interruptible_sleep(delay)
+                attempt += 1
+                continue
+            if e.code not in _RETRY_STATUS or attempt >= attempts - 1:
                 raise
             last = e
             delay = _retry_sleep() * (2**attempt)
@@ -363,11 +408,12 @@ def _post_json_retry(
                 f"retry:{url.split('/')[2]}", f"HTTP {e.code}, sleeping {delay:.0f}s {body}"
             )
             _interruptible_sleep(delay)
+            attempt += 1
         except (urllib.error.URLError, ConnectionError) as e:
             # Note: TimeoutError is deliberately NOT retried. With a 120s budget
             # per hosted call, three timeouts would turn one slow provider into a
             # six-minute stall; a timeout is better answered by the next provider.
-            if attempt == attempts - 1:
+            if attempt >= attempts - 1:
                 raise
             last = e
             delay = _retry_sleep() * (2**attempt)
@@ -375,6 +421,7 @@ def _post_json_retry(
                 f"retry:{url.split('/')[2]}", f"{type(e).__name__}, sleeping {delay:.0f}s"
             )
             _interruptible_sleep(delay)
+            attempt += 1
     if last:
         raise last
     raise RuntimeError("unreachable")
