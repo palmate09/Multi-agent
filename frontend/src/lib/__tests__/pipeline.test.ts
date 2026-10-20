@@ -41,7 +41,10 @@ describe('buildStages', () => {
   });
 
   it('shows the latest stage as active only while the run is moving', () => {
-    const events = [ev(1, 'developer', 'start', 0), ev(2, 'developer', 'progress', 3, { detail: 'writing' })];
+    const events = [
+      ev(1, 'developer', 'start', 0),
+      ev(2, 'developer', 'progress', 3, { detail: 'writing' }),
+    ];
     expect(buildStages(events, true)[0].state).toBe('active');
     // The same events with the run settled must not claim it is still working.
     expect(buildStages(events, false)[0].state).toBe('stopped');
@@ -89,7 +92,10 @@ describe('buildStages', () => {
   });
 
   it('drops a bare "started" once the stage has said something else', () => {
-    const [pm] = buildStages([ev(1, 'pm', 'start', 0), ev(2, 'pm', 'done', 6, { stories: 4 })], false);
+    const [pm] = buildStages(
+      [ev(1, 'pm', 'start', 0), ev(2, 'pm', 'done', 6, { stories: 4 })],
+      false
+    );
     expect(pm.details).toEqual(['4 stories']);
   });
 

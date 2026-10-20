@@ -297,7 +297,6 @@ class _Connection:
         return False
 
 
-
 _db: Database | None = None
 _db_lock = threading.Lock()
 

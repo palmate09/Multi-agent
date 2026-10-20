@@ -74,8 +74,8 @@ export function RequirementForm({ onSubmit, busy, error, onRetry, onDismissError
       <div className="composer-head">
         <h2>New run</h2>
         <p className="composer-lead">
-          Describe the app you want in plain English. The team will plan it, build the backend and the
-          interface together, and test both.
+          Describe the app you want in plain English. The team will plan it, build the backend and
+          the interface together, and test both.
         </p>
       </div>
 

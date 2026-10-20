@@ -234,7 +234,7 @@ _UI_DEVELOPER_SOP = (
     "production-quality web UI for the API below using plain static files.\n"
     "Hard constraints (violating any of them breaks the preview):\n"
     "- Create EXACTLY these files, and no others:\n{file_plan}\n"
-    '- index.html must have a lang, a charset, a descriptive title, '
+    "- index.html must have a lang, a charset, a descriptive title, "
     '`<meta name="viewport" content="width=device-width, initial-scale=1">`, '
     "a link to styles.css, and exactly one mount element "
     '`<div id="root"></div>`, and `<script src="app.js" defer></script>`.\n'
@@ -293,7 +293,7 @@ _UI_DEVELOPER_SOP = (
     "- Semantic HTML: `<main>`, `<header>`, `<section>`, `<form>`, real "
     "`<button>` and `<label>` elements, and `<template>` for repeated rows. "
     "index.html must wrap the app in a `<main>` element that holds the mount "
-    "point: `<body><header>...</header><main id=\"root\"></main></body>`.\n"
+    'point: `<body><header>...</header><main id="root"></main></body>`.\n'
     "- Modern CSS: custom properties, `clamp()` for fluid type, "
     "`:focus-visible`, `prefers-reduced-motion` for animation, and "
     "`prefers-color-scheme` so the page follows the reader's theme.\n"
@@ -369,9 +369,12 @@ def build_ui(
         f"API endpoints:\n{endpoint_lines}\n\n"
         f"UI contract:\n{json.dumps(ui_spec.model_dump(), indent=2)[:3000]}\n{listing}\n"
         f"Files to create (exactly these):\n{plan_text}\n{repair}"
-        + (f"\nThis is a CHANGE to an interface that already exists. The new files must "
-           f"show the change and keep everything the app already offers:\n{followup.strip()}\n"
-           if followup.strip() else "")
+        + (
+            f"\nThis is a CHANGE to an interface that already exists. The new files must "
+            f"show the change and keep everything the app already offers:\n{followup.strip()}\n"
+            if followup.strip()
+            else ""
+        )
         + "Emit the file blocks."
     )
     text, _meta = require(
@@ -558,9 +561,7 @@ def gate(spec: ApiSpec, ui_spec: UiSpec, files: dict[str, str]) -> UiReport:
     css = "\n".join(body for name, body in files.items() if name.endswith(".css"))
 
     # 8. mobile viewport: without it every phone renders a zoomed-out desktop.
-    viewport = bool(
-        re.search(r"<meta[^>]+name\s*=\s*[\"']viewport[\"']", html, re.I)
-    )
+    viewport = bool(re.search(r"<meta[^>]+name\s*=\s*[\"']viewport[\"']", html, re.I))
     checks.append(
         UiCheck(
             name="viewport_meta",
@@ -589,17 +590,13 @@ def gate(spec: ApiSpec, ui_spec: UiSpec, files: dict[str, str]) -> UiReport:
     )
 
     # 10. the stylesheet is actually linked
-    styles_linked = bool(
-        re.search(r"<link[^>]+rel\s*=\s*[\"']stylesheet[\"'][^>]*>", html, re.I)
-    )
+    styles_linked = bool(re.search(r"<link[^>]+rel\s*=\s*[\"']stylesheet[\"'][^>]*>", html, re.I))
     checks.append(
         UiCheck(
             name="stylesheet_link",
             ok=styles_linked,
             detail=(
-                "stylesheet linked"
-                if styles_linked
-                else "index.html does not link a stylesheet"
+                "stylesheet linked" if styles_linked else "index.html does not link a stylesheet"
             ),
         )
     )
@@ -640,9 +637,7 @@ def gate(spec: ApiSpec, ui_spec: UiSpec, files: dict[str, str]) -> UiReport:
             name="focus_states",
             ok=focus,
             detail=(
-                "focus styles found"
-                if focus
-                else "styles.css has no :focus or :focus-visible rule"
+                "focus styles found" if focus else "styles.css has no :focus or :focus-visible rule"
             ),
         )
     )
@@ -655,10 +650,16 @@ def gate(spec: ApiSpec, ui_spec: UiSpec, files: dict[str, str]) -> UiReport:
     mount_ids = re.findall(r'id\s*=\s*["\']([A-Za-z][\w-]*)["\']', html)
     mount_id = next((m for m in mount_ids if m in {"root", "app", "main"}), None)
     mounts = bool(mount_id) and bool(
-        re.search(rf"getElementById\(\s*['\"]{mount_id}['\"]\s*\)|querySelector\(\s*['\"]#{mount_id}['\"]\s*\)", js)
+        re.search(
+            rf"getElementById\(\s*['\"]{mount_id}['\"]\s*\)|querySelector\(\s*['\"]#{mount_id}['\"]\s*\)",
+            js,
+        )
     )
     starts = bool(
-        re.search(r"DOMContentLoaded|window\.onload|addEventListener\(\s*['\"]load['\"]|document\.readyState", js)
+        re.search(
+            r"DOMContentLoaded|window\.onload|addEventListener\(\s*['\"]load['\"]|document\.readyState",
+            js,
+        )
     ) or bool(
         # A call statement at the top level: the script is deferred, so the
         # DOM is already parsed and a top-level call is enough to start.
@@ -689,15 +690,8 @@ def gate(spec: ApiSpec, ui_spec: UiSpec, files: dict[str, str]) -> UiReport:
     # 15. clean, modern JavaScript: no `var`, no crude browser dialogs, no
     # document.write. These are the tells of code nobody meant to ship.
     crude = sorted(
-        {
-            "var"
-            for _ in re.finditer(r"(?m)^\s*var\s+[A-Za-z_$]", js)
-        }
-        | {
-            token
-            for token in ("document.write", "alert(", "prompt(", "confirm(")
-            if token in js
-        }
+        {"var" for _ in re.finditer(r"(?m)^\s*var\s+[A-Za-z_$]", js)}
+        | {token for token in ("document.write", "alert(", "prompt(", "confirm(") if token in js}
     )
     checks.append(
         UiCheck(

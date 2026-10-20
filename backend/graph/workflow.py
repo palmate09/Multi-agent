@@ -542,9 +542,7 @@ def run_team(
         if st.code is None:
             emit("developer", "start")
             if prev_code is not None and st.spec is not None:
-                st.code = Developer.apply_change(
-                    prev_code, st.spec, followup, tests=prev_tests
-                )
+                st.code = Developer.apply_change(prev_code, st.spec, followup, tests=prev_tests)
             else:
                 st.code = Developer.spec_to_code(st.spec, plan=st.plan)
             _write_code(out, st.code)
@@ -1000,9 +998,7 @@ def run_team(
             # blob is a superset of the code the verdict was based on.
             if st.coverage is not None and st.ui_code is not None and st.coverage.missing:
                 routes = all_routes(st.code.files) if st.spec.kind == "api" else set()
-                verdict = coverage_check(
-                    requirement, {**st.code.files, **st.ui_code.files}, routes
-                )
+                verdict = coverage_check(requirement, {**st.code.files, **st.ui_code.files}, routes)
                 st.coverage = CoverageReport(
                     covered=verdict.covered,
                     missing=verdict.missing,

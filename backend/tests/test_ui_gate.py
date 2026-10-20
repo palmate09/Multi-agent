@@ -33,7 +33,7 @@ GOOD_HTML = (
     "<title>Recipes</title>"
     '<link rel="stylesheet" href="styles.css">'
     '<script src="app.js" defer></script></head>'
-    "<body><header><h1>Recipes</h1></header><main id=\"root\"></main></body></html>"
+    '<body><header><h1>Recipes</h1></header><main id="root"></main></body></html>'
 )
 GOOD_JS = (
     "async function load() {\n"
@@ -204,9 +204,7 @@ def test_missing_responsive_breakpoint_is_reported(api_spec):
 
 
 def test_missing_focus_styles_are_reported(api_spec):
-    css = GOOD_CSS.replace(
-        "button:focus-visible { outline: 2px solid var(--accent); }", ""
-    )
+    css = GOOD_CSS.replace("button:focus-visible { outline: 2px solid var(--accent); }", "")
     report = ui.gate(api_spec, GOOD_SPEC, {**GOOD_FILES, "styles.css": css})
     assert not _check(report, "focus_states").ok
 
@@ -254,7 +252,9 @@ def test_outdated_and_crude_javascript_is_reported(api_spec):
 
 
 def test_a_page_without_landmarks_is_reported(api_spec):
-    html = GOOD_HTML.replace("<header><h1>Recipes</h1></header><main id=\"root\"></main>", "<div id=\"root\"></div>")
+    html = GOOD_HTML.replace(
+        '<header><h1>Recipes</h1></header><main id="root"></main>', '<div id="root"></div>'
+    )
     report = ui.gate(api_spec, GOOD_SPEC, {**GOOD_FILES, "index.html": html})
     assert not _check(report, "semantic_html").ok
 

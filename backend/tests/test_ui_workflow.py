@@ -235,7 +235,9 @@ def test_ui_repair_pass_keeps_a_better_second_attempt(monkeypatch, tmp_path):
                 ok=False,
                 checks=[
                     UiCheck(
-                        name="stylesheet_link", ok=False, detail="index.html does not link a stylesheet"
+                        name="stylesheet_link",
+                        ok=False,
+                        detail="index.html does not link a stylesheet",
                     )
                 ],
             ),

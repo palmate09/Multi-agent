@@ -50,8 +50,8 @@ export function LoginPage({ onLogin, error, busy }: Props) {
             <h1>Multi-Agent Software Team</h1>
           </div>
           <p className="auth-pitch">
-            Describe an app in plain English. A team of agents plans, builds, tests and reviews it
-            — a tested REST API, and a working web UI when you ask for one.
+            Describe an app in plain English. A team of agents plans, builds, tests and reviews it —
+            a tested REST API, and a working web UI when you ask for one.
           </p>
           <ol className="auth-steps" aria-label="The agents in a run">
             {AGENT_STEPS.map(step => (

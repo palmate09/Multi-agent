@@ -71,18 +71,18 @@ _FULLSTACK_RULES = (
     "interface at the root path, so a person can open it in a browser and use "
     "it, and the sandbox runs exactly this process.\n"
     "- The file plan above lists `static/index.html`: create it as a minimal, "
-    "valid HTML shell with a `<div id=\"root\"></div>` mount point, a link to "
+    'valid HTML shell with a `<div id="root"></div>` mount point, a link to '
     "`styles.css` and a script tag for `app.js`. The real interface is "
     "generated separately and replaces this file, so keep it simple and "
     "correct -- it must never be the reason the app fails to start.\n"
     "- Import `os` and `from pathlib import Path`, and make sure the directory "
     "exists before you mount it: `static_dir = Path(__file__).parent / "
-    "\"static\"` followed by `os.makedirs(static_dir, exist_ok=True)`. A mount "
+    '"static"` followed by `os.makedirs(static_dir, exist_ok=True)`. A mount '
     "on a missing directory makes the whole application fail to start.\n"
     "- Import `from fastapi.staticfiles import StaticFiles` and mount it LAST, "
     "after every API route has been registered, so the API always wins:\n"
-    "  app.mount(\"/\", StaticFiles(directory=str(static_dir), html=True), "
-    "name=\"web\")\n"
+    '  app.mount("/", StaticFiles(directory=str(static_dir), html=True), '
+    'name="web")\n'
     "- `GET /` must return that HTML page with status 200. Do not register a "
     "route on `/` yourself and do not add a catch-all JSON route: the mount "
     "serves the page.\n"

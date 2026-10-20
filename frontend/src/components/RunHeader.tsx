@@ -105,10 +105,7 @@ export function RunHeader({
             </Button>
           )}
           {restartable && (
-            <Button
-              onClick={onRestart}
-              title="Delete all of this run's data and start over"
-            >
+            <Button onClick={onRestart} title="Delete all of this run's data and start over">
               <Icon name="restart" size={14} />
               Restart
             </Button>

@@ -218,9 +218,9 @@ def test_a_follow_up_run_applies_the_change_to_the_previous_app(monkeypatch, tmp
     monkeypatch.setattr(
         Workflow.Runner,
         "run_tests",
-        lambda code, tests, **k: __import__(
-            "schemas.messages", fromlist=["TestReport"]
-        ).TestReport(passed=1, failed=0),
+        lambda code, tests, **k: __import__("schemas.messages", fromlist=["TestReport"]).TestReport(
+            passed=1, failed=0
+        ),
     )
     monkeypatch.setattr(Workflow.Runner, "static_analysis", lambda *a, **k: ("", ""))
     from agents import reasoner, reviewer, tester
@@ -229,14 +229,14 @@ def test_a_follow_up_run_applies_the_change_to_the_previous_app(monkeypatch, tmp
     monkeypatch.setattr(
         reviewer,
         "review",
-        lambda *a, **k: __import__(
-            "schemas.messages", fromlist=["ReviewReport"]
-        ).ReviewReport(),
+        lambda *a, **k: __import__("schemas.messages", fromlist=["ReviewReport"]).ReviewReport(),
     )
     monkeypatch.setattr(
-        reasoner, "plan", lambda requirement, stories=None: __import__(
-            "schemas.messages", fromlist=["Plan"]
-        ).Plan(approach="stub")
+        reasoner,
+        "plan",
+        lambda requirement, stories=None: __import__("schemas.messages", fromlist=["Plan"]).Plan(
+            approach="stub"
+        ),
     )
     monkeypatch.setattr(
         tester,
@@ -342,7 +342,9 @@ def test_the_api_queues_a_follow_up_and_lists_it(tmp_path, monkeypatch):
         out = Path(out_dir)
         (out / "code").mkdir(parents=True, exist_ok=True)
         (out / "stories.json").write_text(
-            UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]).model_dump_json()
+            UserStories(
+                stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]
+            ).model_dump_json()
         )
         (out / "code" / "app.py").write_text("x = 1\n")
         seen.append(kw)
@@ -355,9 +357,7 @@ def test_the_api_queues_a_follow_up_and_lists_it(tmp_path, monkeypatch):
     app = create_app()
     try:
         with TestClient(app) as client:
-            parent = client.post(
-                "/api/runs", json={"requirement": "Build a library API"}
-            ).json()
+            parent = client.post("/api/runs", json={"requirement": "Build a library API"}).json()
             deadline = time.time() + 20
             while time.time() < deadline:
                 detail = client.get(f"/api/runs/{parent['run_id']}").json()
@@ -398,9 +398,7 @@ def test_an_empty_follow_up_is_refused(tmp_path, monkeypatch):
     try:
         with TestClient(app) as client:
             parent = client.post("/api/runs", json={"requirement": "Build a library API"}).json()
-            resp = client.post(
-                f"/api/runs/{parent['run_id']}/followups", json={"prompt": "   "}
-            )
+            resp = client.post(f"/api/runs/{parent['run_id']}/followups", json={"prompt": "   "})
             assert resp.status_code == 422
     finally:
         get_settings.cache_clear()

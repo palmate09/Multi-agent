@@ -314,9 +314,7 @@ def _program_tests(spec: ApiSpec, listing: str, code: CodeBundle | None = None) 
             )
             continue
         if re.search(r"=\s*(?:FastAPI|APIRouter)\s*\(", body):
-            problem = (
-                "it built its own web app, but this project is a program, not a service"
-            )
+            problem = "it built its own web app, but this project is a program, not a service"
             continue
         count = _test_function_count(body)
         if count < min_tests:

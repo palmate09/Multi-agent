@@ -569,11 +569,7 @@ class RunStore:
     def followups_of(self, parent_id: str) -> list[dict[str, Any]]:
         """The follow-up turns of a run, oldest first."""
         with self._lock:
-            children = [
-                r
-                for r in self._runs.values()
-                if r.options.get("followup_of") == parent_id
-            ]
+            children = [r for r in self._runs.values() if r.options.get("followup_of") == parent_id]
         children.sort(key=lambda r: r.created_at)
         out = []
         for r in children:

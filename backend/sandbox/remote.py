@@ -209,9 +209,7 @@ def _noop(*_args: Any, **_kwargs: Any) -> Any:
     return None
 
 
-def run_container(
-    argv: list[str], timeout: int = 120, mount: str | None = None
-) -> Any:
+def run_container(argv: list[str], timeout: int = 120, mount: str | None = None) -> Any:
     from .docker import ContainerResult
 
     payload = decompose(argv)

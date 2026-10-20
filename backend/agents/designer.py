@@ -188,7 +188,7 @@ def _compact_error(why: str) -> str:
         return "the document was rejected"
     head = lines[0]
     where = next((line for line in lines if line.startswith("On instance")), "")
-    return f"{head} (at {where[len('On instance'):].strip()})" if where else head
+    return f"{head} (at {where[len('On instance') :].strip()})" if where else head
 
 
 def _plan_files(entrypoint: str, endpoints: int) -> list[str]:

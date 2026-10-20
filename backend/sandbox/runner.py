@@ -330,8 +330,9 @@ def run_tests_local(code: CodeBundle, tests: TestSuite, timeout: int = 60) -> Te
     with _bundle_dir("agent-team-") as tmp:
         try:
             write_bundle(code, tests, tmp)
-            p = subprocess.run([PY, *PYTEST_ARGS], cwd=tmp,
-                               capture_output=True, text=True, timeout=timeout)
+            p = subprocess.run(
+                [PY, *PYTEST_ARGS], cwd=tmp, capture_output=True, text=True, timeout=timeout
+            )
             output = p.stdout + "\n" + p.stderr
             return _annotate(_parse_pytest(output), output, _importable_modules(code))
         except subprocess.TimeoutExpired:
@@ -532,8 +533,6 @@ if import_errors:
 """
 
 
-
-
 def boot_check(
     code: CodeBundle,
     timeout: int = 60,
@@ -559,9 +558,9 @@ def boot_check(
         modules = _importable_modules(code)
         if not modules:
             return False, "no importable python module in the bundle"
-        probe = _PROGRAM_PROBE.replace(
-            "__WANTED__", repr(list(public_api))
-        ).replace("__MODS__", repr(modules))
+        probe = _PROGRAM_PROBE.replace("__WANTED__", repr(list(public_api))).replace(
+            "__MODS__", repr(modules)
+        )
     else:
         found = find_app_object(code.files)
         if not found:
@@ -664,7 +663,6 @@ def _exec_in_container(py_args: list[str], workdir: Path, timeout: int) -> str:
         return Docker.run_container(argv, timeout=timeout, mount=str(workdir)).output
 
 
-
 def _importable_modules(code: CodeBundle) -> list[str]:
     """Dotted module names for each generated file, package-style where needed."""
     out: list[str] = []
@@ -698,11 +696,22 @@ def static_analysis(code: CodeBundle) -> tuple[str, str]:
                 ruff_out = _exec_in_container(["-m", "ruff", "check", "."], tmp, 60)
                 bandit_out = _exec_in_container(["-m", "bandit", "-q", "-r", "."], tmp, 60)
                 return ruff_out[-2000:], bandit_out[-2000:]
-            r = subprocess.run([PY, "-m", "ruff", "check", "."], cwd=tmp, capture_output=True, text=True, timeout=30)
+            r = subprocess.run(
+                [PY, "-m", "ruff", "check", "."],
+                cwd=tmp,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
             ruff_out = (r.stdout + r.stderr)[-2000:]
-            b = subprocess.run([PY, "-m", "bandit", "-q", "-r", "."], cwd=tmp, capture_output=True, text=True, timeout=30)
+            b = subprocess.run(
+                [PY, "-m", "bandit", "-q", "-r", "."],
+                cwd=tmp,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
             bandit_out = (b.stdout + b.stderr)[-2000:]
             return ruff_out, bandit_out
         except Exception as e:
             return str(e), ""
-

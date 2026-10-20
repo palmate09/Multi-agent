@@ -5,7 +5,13 @@ import { PipelineRail } from '../PipelineRail';
 import type { PipelineEvent } from '../../types';
 
 const events = [
-  { seq: 1, node: 'pipeline', phase: 'start', ts: '2026-10-17T08:10:00Z', nodes: ['pm', 'designer', 'developer'] },
+  {
+    seq: 1,
+    node: 'pipeline',
+    phase: 'start',
+    ts: '2026-10-17T08:10:00Z',
+    nodes: ['pm', 'designer', 'developer'],
+  },
   { seq: 2, node: 'pm', phase: 'done', ts: '2026-10-17T08:10:05Z', stories: 3 },
   { seq: 3, node: 'designer', phase: 'start', ts: '2026-10-17T08:10:06Z' },
 ] as PipelineEvent[];

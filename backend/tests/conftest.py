@@ -47,6 +47,7 @@ try:  # pragma: no cover - only when python-dotenv is installed
 except Exception:  # pragma: no cover
     pass
 
+
 def pytest_collection_modifyitems(config, items):
     """Deselect ``live_llm`` tests unless Ollama actually answers.
 

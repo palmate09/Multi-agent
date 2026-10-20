@@ -112,7 +112,7 @@ def test_designer_treats_a_bare_ask_as_a_full_stack_app(monkeypatch):
         return (
             "```yaml\nopenapi: 3.1.0\ninfo: {title: C, version: 1.0.0}\npaths:\n"
             "  /api/counter:\n    get:\n      responses: {'200': {description: ok}}\n"
-            "```\n```json\n{\"entrypoint\": \"main.py\", \"files\": [\"main.py\"]}\n```",
+            '```\n```json\n{"entrypoint": "main.py", "files": ["main.py"]}\n```',
             {"ok": True},
         )
 
@@ -367,7 +367,9 @@ def test_patch_prompt_carries_the_contract_as_authority(monkeypatch):
 
     monkeypatch.setattr(developer, "require", spy)
     code = CodeBundle(files={"app.py": "x = 1"}, entry_module="app", entry_attr="app")
-    spec = ApiSpec(openapi_yaml="openapi: 3.1.0\npaths:\n  /items:\n    get:\n      responses: {'200': {description: ok}}\n")
+    spec = ApiSpec(
+        openapi_yaml="openapi: 3.1.0\npaths:\n  /items:\n    get:\n      responses: {'200': {description: ok}}\n"
+    )
     developer.patch_code(
         code,
         TestReport(passed=0, failed=1, failures=[TestFailure(name="t", error="e")]),
@@ -389,12 +391,7 @@ def test_patch_keeps_a_reply_that_only_replaces_a_class_module(monkeypatch):
     """
     from schemas.messages import CodeBundle, TestFailure, TestReport
 
-    reply = (
-        "### models.py\n```python\n"
-        "from database import engine\n"
-        "class Habit:\n    pass\n"
-        "```"
-    )
+    reply = "### models.py\n```python\nfrom database import engine\nclass Habit:\n    pass\n```"
     monkeypatch.setattr(developer, "require", lambda *a, **k: (reply, {"ok": True}))
     code = CodeBundle(
         files={"models.py": "class Habit:\n    pass\n", "app.py": "x = 1"},
@@ -463,9 +460,7 @@ def _suite(n: int, module: str = "app", path: str = "/x") -> str:
         for i in range(n)
     )
     return (
-        f"```python\nimport {module}\nfrom fastapi.testclient import TestClient\n"
-        + body
-        + "\n```"
+        f"```python\nimport {module}\nfrom fastapi.testclient import TestClient\n" + body + "\n```"
     )
 
 
@@ -492,10 +487,7 @@ def test_tester_rejects_a_suite_that_stays_thin(monkeypatch):
 
 
 _RECIPES_SPEC = (
-    "openapi: 3.1.0\n"
-    "paths:\n"
-    "  /recipes:\n"
-    "    get:\n      responses: {'200': {description: ok}}\n"
+    "openapi: 3.1.0\npaths:\n  /recipes:\n    get:\n      responses: {'200': {description: ok}}\n"
 )
 
 

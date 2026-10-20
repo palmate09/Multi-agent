@@ -216,8 +216,7 @@ def _count(text: str, signals: tuple[str, ...]) -> int:
 
 def _has(text: str, signals: tuple[str, ...]) -> bool:
     return any(
-        re.search(rf"(?<![a-z0-9]){re.escape(signal)}(?![a-z0-9])", text)
-        for signal in signals
+        re.search(rf"(?<![a-z0-9]){re.escape(signal)}(?![a-z0-9])", text) for signal in signals
     )
 
 

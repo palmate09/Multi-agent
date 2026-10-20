@@ -125,7 +125,9 @@ def test_domain_missed_is_its_own_status(monkeypatch, tmp_path):
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
     monkeypatch.setattr(
-        designer, "stories_to_spec", lambda s, requirement="", plan=None, want_ui=False: _spec_for_library()
+        designer,
+        "stories_to_spec",
+        lambda s, requirement="", plan=None, want_ui=False: _spec_for_library(),
     )
     # Correct, working code — for the wrong domain entirely.
     monkeypatch.setattr(
@@ -166,7 +168,9 @@ def test_coverage_gate_runs_before_tests_are_graded(monkeypatch, tmp_path):
     from agents import designer
 
     monkeypatch.setattr(
-        designer, "stories_to_spec", lambda s, requirement="", plan=None, want_ui=False: _spec_for_library()
+        designer,
+        "stories_to_spec",
+        lambda s, requirement="", plan=None, want_ui=False: _spec_for_library(),
     )
     monkeypatch.setattr(
         developer,
@@ -196,7 +200,9 @@ def test_fix_loop_stops_when_patch_changes_nothing(monkeypatch, tmp_path):
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
     monkeypatch.setattr(
-        designer, "stories_to_spec", lambda s, requirement="", plan=None, want_ui=False: _spec_for_library()
+        designer,
+        "stories_to_spec",
+        lambda s, requirement="", plan=None, want_ui=False: _spec_for_library(),
     )
     monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
     monkeypatch.setattr(
@@ -244,7 +250,9 @@ def test_a_no_op_repair_is_retried_with_a_different_ask(monkeypatch, tmp_path):
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
     monkeypatch.setattr(
-        designer, "stories_to_spec", lambda s, requirement="", plan=None, want_ui=False: _spec_for_library()
+        designer,
+        "stories_to_spec",
+        lambda s, requirement="", plan=None, want_ui=False: _spec_for_library(),
     )
     monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
     notes: list[str] = []
@@ -299,7 +307,9 @@ def test_fix_loop_reports_llm_outage_honestly(monkeypatch, tmp_path):
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
     monkeypatch.setattr(
-        designer, "stories_to_spec", lambda s, requirement="", plan=None, want_ui=False: _spec_for_library()
+        designer,
+        "stories_to_spec",
+        lambda s, requirement="", plan=None, want_ui=False: _spec_for_library(),
     )
     monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
     monkeypatch.setattr(developer, "patch_code", _boom)
@@ -333,7 +343,9 @@ def test_fix_loop_applies_a_real_change(monkeypatch, tmp_path):
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
     monkeypatch.setattr(
-        designer, "stories_to_spec", lambda s, requirement="", plan=None, want_ui=False: _spec_for_library()
+        designer,
+        "stories_to_spec",
+        lambda s, requirement="", plan=None, want_ui=False: _spec_for_library(),
     )
     monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
     monkeypatch.setattr(
@@ -393,7 +405,9 @@ def test_boot_failure_is_reported(monkeypatch, tmp_path):
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
     monkeypatch.setattr(
-        designer, "stories_to_spec", lambda s, requirement="", plan=None, want_ui=False: _spec_for_library()
+        designer,
+        "stories_to_spec",
+        lambda s, requirement="", plan=None, want_ui=False: _spec_for_library(),
     )
     monkeypatch.setattr(
         developer,
@@ -459,7 +473,9 @@ def test_boot_failure_enters_the_fix_loop(monkeypatch, tmp_path):
         lambda r: UserStories(stories=[{"id": "US1", "title": "T", "acceptance": ["x"]}]),
     )
     monkeypatch.setattr(
-        designer, "stories_to_spec", lambda s, requirement="", plan=None, want_ui=False: _spec_for_library()
+        designer,
+        "stories_to_spec",
+        lambda s, requirement="", plan=None, want_ui=False: _spec_for_library(),
     )
     monkeypatch.setattr(developer, "spec_to_code", lambda spec, plan=None: _bundle())
     monkeypatch.setattr(

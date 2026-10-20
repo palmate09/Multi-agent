@@ -172,9 +172,7 @@ def child_env(workdir: Path, limits: SandboxLimits | None = None) -> dict[str, s
     about why.
     """
     env = {k: v for k, v in os.environ.items() if k not in STRIPPED_ENV and "API_KEY" not in k}
-    data_dir = (
-        str(workdir) if limits is None else (limits.data_mount or str(workdir))
-    )
+    data_dir = str(workdir) if limits is None else (limits.data_mount or str(workdir))
     env.update(
         {
             # Tells generated code it is being previewed, not deployed.
@@ -290,7 +288,6 @@ class PreviewSession:
             # own (OOM, a review patch that broke the app).
             return Docker.is_running(self.container_id)
         return self.proc is not None and self.proc.poll() is None
-
 
     def log_tail(self, lines: int = 40) -> str:
         """The last ``lines`` of the app's output, from wherever it is running."""
@@ -529,9 +526,7 @@ class PlaygroundService:
                 raise
             # A failure before anything was spawned is a plain error: no
             # engine, no image, no entry point to serve.
-            raise RuntimeError(
-                f"preview for run '{run_id}' could not start: {exc}"
-            ) from exc
+            raise RuntimeError(f"preview for run '{run_id}' could not start: {exc}") from exc
 
         session.error = ""
         if self._await_health(session, source):
@@ -652,7 +647,9 @@ class PlaygroundService:
         if not wanted:
             return False
         if wanted <= _installed_distributions():
-            log.debug("preview %s: all %d requirements already satisfied", workdir.name, len(wanted))
+            log.debug(
+                "preview %s: all %d requirements already satisfied", workdir.name, len(wanted)
+            )
             return False
         if Runner.uses_docker():
             # Named, not installed. A user watching a preview crash on an
@@ -925,9 +922,7 @@ def _probe_paths(source: Path) -> list[str]:
 
             pairs, paths = spec_paths(spec_file.read_text())
             gets = {p for p, method in pairs if method.upper() == "GET"}
-            candidates = sorted(
-                p for p in paths if p in gets and "{" not in p and p != "/health"
-            )
+            candidates = sorted(p for p in paths if p in gets and "{" not in p and p != "/health")
         except Exception:
             candidates = []
     if _run_kind(source) == "fullstack":

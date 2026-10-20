@@ -18,9 +18,7 @@ interface Props {
 export function PipelineTimeline({ events, running }: Props) {
   if (events.length === 0) {
     return (
-      <EmptyState>
-        No pipeline activity yet. Each agent step appears here as it happens.
-      </EmptyState>
+      <EmptyState>No pipeline activity yet. Each agent step appears here as it happens.</EmptyState>
     );
   }
 

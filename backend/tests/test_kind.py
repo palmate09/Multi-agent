@@ -110,7 +110,7 @@ def test_backend_only_stays_a_service():
     ],
 )
 def test_an_app_named_after_a_program_word_is_still_an_app(requirement):
-    """"planner", "tree" and "engine" are program nouns, not requests for one.
+    """ "planner", "tree" and "engine" are program nouns, not requests for one.
 
     A person asking for a todo planner wants a todo planner, not a Python
     program that prints one.
@@ -149,7 +149,7 @@ def test_want_ui_promotes_a_plain_api_ask_to_a_full_stack_app():
 
 
 def test_word_boundaries_stop_ui_matching_build():
-    """"ui" is a substring of "build"; substring matching classified
+    """ "ui" is a substring of "build"; substring matching classified
     everything as a web app."""
     assert detect_kind("build a counter") == "fullstack"
     assert detect_kind("a quick build of a price calculator") == "program"

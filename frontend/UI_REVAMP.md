@@ -6,25 +6,25 @@ lockfile is unchanged).
 
 ## Themes
 
-| | Dark ("graphite") | Light ("daylight") |
-|---|---|---|
-| Surfaces | neutral charcoal | white on cool grey |
-| Accent | bright sky, dark label | deeper sky, white label |
+|          | Dark ("graphite")      | Light ("daylight")      |
+| -------- | ---------------------- | ----------------------- |
+| Surfaces | neutral charcoal       | white on cool grey      |
+| Accent   | bright sky, dark label | deeper sky, white label |
 
 The old navy-and-indigo theme is replaced. A new **System / Light / Dark** switch
 sits in the top bar and on the sign-in page. The choice is remembered, follows
-the OS while on *System*, and is applied by a small inline script in
+the OS while on _System_, and is applied by a small inline script in
 `index.html` before first paint, so a light-mode user never sees a dark flash.
 
 Both themes live in `src/styles/tokens.css`. Every colour pair is annotated with
 its measured contrast and passes WCAG AA — verified again in the real rendered
-DOM (see *Verification*).
+DOM (see _Verification_).
 
 ## UX changes
 
 1. **Master/detail layout.** The "New run" form used to sit above every run and
    push the results below the fold. Now the sidebar has a **New run** button;
-   the main area shows the form (with a "how a run works" overview) *or* the run.
+   the main area shows the form (with a "how a run works" overview) _or_ the run.
 2. **Pipeline stage rail** in every run header: all stages in one line, with
    done / running / failed / waiting, so "where is my run, and where did it
    stop?" is visible from any tab.

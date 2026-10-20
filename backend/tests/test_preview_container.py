@@ -84,6 +84,7 @@ SPEC_YAML = (
     "  /items:\n    get:\n      responses: {'200': {description: ok}}\n"
 )
 
+
 # ------------------------------------------------------------------------ fixtures ---
 @pytest.fixture()
 def runs_root(tmp_path):
@@ -211,6 +212,7 @@ def test_crash_restart_recovers_a_container_preview(client):
     _start(client)
 
     from app.services.playground import get_playground
+
     svc = get_playground()
 
     # Get the internal session to find the container_id

@@ -112,8 +112,8 @@ export function PlaygroundPanel({ run, reloadKey, onReload }: Props) {
           <div className="hint">{EXPLAIN[state]}</div>
           {run.kind === 'fullstack' && (
             <div className="hint">
-              This is the generated application itself — the same process serves the page and
-              the API.
+              This is the generated application itself — the same process serves the page and the
+              API.
             </div>
           )}
         </div>

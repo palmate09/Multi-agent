@@ -191,9 +191,7 @@ def update_stories(requirement: str, request: str, previous: UserStories) -> Use
             )
             continue
         return parsed
-    raise GenerationError(
-        "PM could not apply the change to the stories: " + "; ".join(errors)
-    )
+    raise GenerationError("PM could not apply the change to the stories: " + "; ".join(errors))
 
 
 def requirement_to_stories(requirement: str) -> UserStories:

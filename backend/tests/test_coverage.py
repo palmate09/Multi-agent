@@ -206,9 +206,7 @@ def test_short_game_requirement_passes_with_one_domain_word():
 
 def test_ui_prose_is_not_domain_terms():
     """Full-stack asks mix UI instructions with domain nouns."""
-    groups = term_groups(
-        "Show the board, let two players take turns and add a reset button."
-    )
+    groups = term_groups("Show the board, let two players take turns and add a reset button.")
     terms = [g[0] for g in groups]
     for word in ("show", "let", "two", "take", "turns", "button"):
         assert word not in terms, word

@@ -162,8 +162,8 @@
     ui-sans-serif, system-ui, -apple-system, 'Segoe UI Variable Text', 'Segoe UI', Roboto,
     'Helvetica Neue', Arial, sans-serif;
   --font-mono:
-    ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Code', Menlo, Consolas,
-    'Liberation Mono', monospace;
+    ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Code', Menlo, Consolas, 'Liberation Mono',
+    monospace;
 
   /* Nothing below 11px; nothing a person has to read is below 12px. */
   --font-size-2xs: 11px; /* count pills, severity tags */

@@ -119,7 +119,6 @@ def new_raw_session_token() -> str:
     return secrets.token_urlsafe(32)
 
 
-
 # --------------------------------------------------------------------------
 # sessions
 # --------------------------------------------------------------------------
@@ -198,7 +197,6 @@ def _accepts_legacy_cookies() -> bool:
     or it is not.
     """
     return os.getenv("AUTH_ACCEPT_LEGACY_SESSIONS", "1") == "1"
-
 
 
 def issue_session(username: str) -> tuple[str, str]:
@@ -320,7 +318,6 @@ def current_user(request: Request) -> str | None:
         if data:
             return data.get("u") or None
     return None
-
 
 
 def require_auth(request: Request) -> str:

@@ -64,9 +64,9 @@ export function FollowUpPanel({ detail, onOpenRun }: Props) {
     <div className="panel-stack">
       <Card label="Change this app">
         <p className="hint">
-          Describe one change in plain English. The team applies it to the app that already
-          exists — the stories, the contract, the code, the tests and the interface are all
-          updated together, and nothing that already works is dropped.
+          Describe one change in plain English. The team applies it to the app that already exists —
+          the stories, the contract, the code, the tests and the interface are all updated together,
+          and nothing that already works is dropped.
         </p>
         <Textarea
           id="followup"
