@@ -54,8 +54,13 @@ jobs:
         run: |
           # Catches broken interpolation and missing required-variable guards.
           # Auth enforcement itself is covered by backend/tests/test_auth.py.
+          # POSTGRES_PASSWORD is required by the production compose file
+          # (":?missing - run ./deploy/bootstrap-env.sh"), so it has to be
+          # supplied here too: without it the check could not run at all, and
+          # the job failed before it validated anything.
           REGISTRY=ghcr.io/example TAG=test \
           AUTH_SECRET=testsecret AUTH_PASSWORD_HASH=scrypt.16384.8.1.salt.digest \
+          POSTGRES_PASSWORD=testpassword POSTGRES_USER=mat POSTGRES_DB=mat \
           docker compose -f ../deploy/docker-compose.prod.yml config -q
 
       - name: Stub pipeline smoke test
