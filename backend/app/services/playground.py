@@ -36,7 +36,7 @@ import os
 import re
 import shutil
 import socket
-import subprocess
+import subprocess  # nosec B404 - the preview starts the generated app; see _spawn_subprocess
 import sys
 import threading
 import time
@@ -662,7 +662,7 @@ class PlaygroundService:
             )
             return False
         try:
-            subprocess.run(
+            subprocess.run(  # nosec B603 - a fixed argv, no shell, in a private workdir
                 [sys.executable, "-m", "pip", "install", "--quiet", "-r", str(req)],
                 cwd=workdir,
                 env=child_env(workdir),
@@ -720,6 +720,9 @@ class PlaygroundService:
                 "uvicorn",
                 f"{module}:{attr}",
                 "--host",
+                # nosec B104 - inside the container the app must listen on
+                # every interface; the port is reachable only through the
+                # sandbox network, which has no route off the host.
                 "0.0.0.0",
                 "--port",
                 str(_CONTAINER_PORT),
@@ -746,7 +749,7 @@ class PlaygroundService:
     def _spawn_subprocess(self, session: PreviewSession, module: str, attr: str) -> None:
         session.port = _free_port()
         logfile = session.log_path.open("w")
-        session.proc = subprocess.Popen(
+        session.proc = subprocess.Popen(  # nosec B603 - a fixed argv, no shell
             [
                 sys.executable,
                 "-m",
@@ -799,6 +802,8 @@ class PlaygroundService:
                     # never counts as life.
                     response = httpx.get(url, timeout=2.0, follow_redirects=False)
                 except Exception:
+                    # nosec B112 - a candidate that could not be reached is
+                    # simply not ready; the next candidate is tried.
                     continue
                 if response.status_code >= 500:
                     continue
