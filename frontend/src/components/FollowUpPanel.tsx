@@ -11,7 +11,7 @@ import { Textarea } from './ui/Field';
 interface Props {
   detail: RunDetail;
   /** Called with the id of the run a change produced, so it can be opened. */
-  onOpenRun: (runId: string) => void;
+  onOpenRun: (_runId: string) => void;
 }
 
 const TONE: Record<string, 'good' | 'warn' | 'bad' | 'idle'> = {

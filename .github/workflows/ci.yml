@@ -130,7 +130,15 @@ jobs:
       # terminate `blocked` deterministically; the finished run the suite
       # reads comes from e2e/fixtures/seed_run.py, not from a model.
       - name: Install backend dependencies
-        run: pip install -r ../backend/requirements.txt
+        # The venv, not the system Python: the Playwright webServer starts the
+        # API with ../.venv/bin/python (see frontend/playwright.config.ts).
+        # Installing into the system Python left the suite unable to start at
+        # all -- "Process from config.webServer was not able to start" -- and
+        # that is why the last run on main was red.
+        run: |
+          python -m venv ../.venv
+          ../.venv/bin/pip install --upgrade pip
+          ../.venv/bin/pip install -r ../backend/requirements.txt
 
       - name: Install frontend dependencies
         run: npm ci --no-audit --no-fund

@@ -96,8 +96,11 @@ test.describe('playground', () => {
 
     // However it goes, it must settle on a stated outcome, never spin forever.
     await expect(status).toHaveText(/running|crashed|stopped/, { timeout: 40_000 });
+    // The panel says which outcome it is, in words. (The wording moved when
+    // the preview stopped being a loopback subprocess and became a container
+    // behind the sidecar; the test follows the copy, not the other way round.)
     await expect(
-      page.getByText(/loopback port behind the gateway|did not come up|Not running/i)
+      page.getByText(/serving behind the gateway|did not come up|Not running/i)
     ).toBeVisible();
   });
 
